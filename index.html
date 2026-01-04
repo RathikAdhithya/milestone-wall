@@ -43,7 +43,32 @@
         <input type="hidden" name="y" value="" />
         <input type="hidden" name="rot" value="" />
         <input type="hidden" name="scale" value="" />
+        <input type="hidden" name="taken_date" value="" />
     </form>
+
+    <button id="makeMemoryBtn">Make memory</button>
+
+    <div id="modalOverlay">
+    <div id="modal">
+        <h3>Create a memory</h3>
+        <div class="row">
+        <input id="memTag" maxlength="60" placeholder="Short tag (e.g., 'First Trip')" />
+        </div>
+        <div class="row">
+        <input id="memDate" type="date" />
+        </div>
+        <div class="row">
+        <input id="memFile" type="file" accept="image/*" />
+        </div>
+        <div id="memHint" style="opacity:0.85; font-size:12px; line-height:1.3;">
+        Pick a photo + date, then click “Place on wall”.
+        </div>
+        <div class="actions">
+        <button id="memCancel">Cancel</button>
+        <button id="memPlace" class="primary">Place on wall</button>
+        </div>
+    </div>
+    </div>
 
     <script src="app.js"></script>
 </body>

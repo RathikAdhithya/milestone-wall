@@ -21,6 +21,19 @@ gasForm.setAttribute("action", GAS_URL);
 let items = [];
 let selectedId = null;
 
+function formatDateLabel(s){
+    if(!s) return "";
+    try{
+        const d = new Date(s + "T00:00:00");
+        return d.toLocaleDateString(undefined, { year:"numeric", month:"short", day:"2-digit" });
+    }catch(e){ return s; }
+}
+
+function toTs(dateStr){
+    if(!dateStr) return Date.now();
+    return new Date(dateStr + "T00:00:00Z").getTime();
+}
+
 function jsonpList() {
     const cb = "handleList_" + Date.now();
     window[cb] = (data) => {
@@ -38,7 +51,27 @@ function jsonpList() {
 
 function renderFromList(data) {
     if (!data || !data.ok) return;
-    items = data.items || [];
+    items = (data.items || []).map(it => ({
+        ...it,
+        takenDate: it.takenDate || it.taken_date || it.takenDate,
+        sortTs: it.sortTs || it.sort_ts || 0
+    }));
+
+    items.sort((a,b) => (a.sortTs||0) - (b.sortTs||0));
+
+    const firstValid = items.find(it => it.sortTs && it.sortTs > 0);
+    const minTs = firstValid ? firstValid.sortTs : Date.now();
+
+    const pxPerDay = 45;
+    const paddingX = 200;
+
+    // compute timeline X
+    for(const it of items){
+        const t = it.sortTs || minTs;
+        const days = Math.round((t - minTs) / (1000*60*60*24));
+        it.x = paddingX + days * pxPerDay;
+        if (it.y == null) it.y = 180;
+    }
     wall.innerHTML = "";
     selectedId = null;
     setSelected(null);
@@ -64,6 +97,11 @@ function makePhoto(it) {
     const t = document.createElement("div");
     t.className = "tag";
     t.textContent = it.tag || "";
+
+    const d = document.createElement("div");
+    d.className = "dateLabel";
+    d.textContent = formatDateLabel(it.takenDate);
+    el.appendChild(d);
 
     frame.appendChild(img);
     frame.appendChild(t);
@@ -243,17 +281,18 @@ function sendBeaconUpdate(it) {
 }
 
 function postViaForm(action, fields) {
-    gasForm.action.value = action;
-    gasForm.key.value = UPLOAD_KEY;
+    gasForm.elements["action"].value = action;
+    gasForm.elements["key"].value = UPLOAD_KEY;
 
-    gasForm.id.value = fields.id || "";
-    gasForm.fileName.value = fields.fileName || "";
-    gasForm.tag.value = fields.tag || "";
-    gasForm.imageData.value = fields.imageData || "";
-    gasForm.x.value = (fields.x != null) ? fields.x : "";
-    gasForm.y.value = (fields.y != null) ? fields.y : "";
-    gasForm.rot.value = (fields.rot != null) ? fields.rot : "";
-    gasForm.scale.value = (fields.scale != null) ? fields.scale : "";
+    gasForm.elements["id"].value = fields.id || "";
+    gasForm.elements["fileName"].value = fields.fileName || "";
+    gasForm.elements["tag"].value = fields.tag || "";
+    gasForm.elements["imageData"].value = fields.imageData || "";
+    gasForm.elements["x"].value = (fields.x != null) ? fields.x : "";
+    gasForm.elements["y"].value = (fields.y != null) ? fields.y : "";
+    gasForm.elements["rot"].value = (fields.rot != null) ? fields.rot : "";
+    gasForm.elements["scale"].value = (fields.scale != null) ? fields.scale : "";
+    gasForm.elements["taken_date"].value = fields.taken_date || "";
 
     gasForm.submit();
     }
@@ -302,6 +341,85 @@ window.addEventListener("message", (ev) => {
     if (data.ok && data.action === "delete") {
         jsonpList();
     }
+});
+
+const makeMemoryBtn = document.getElementById("makeMemoryBtn");
+const modalOverlay = document.getElementById("modalOverlay");
+const memTag = document.getElementById("memTag");
+const memDate = document.getElementById("memDate");
+const memFile = document.getElementById("memFile");
+const memHint = document.getElementById("memHint");
+const memCancel = document.getElementById("memCancel");
+const memPlace = document.getElementById("memPlace");
+
+let pendingMemory = null;
+
+makeMemoryBtn.addEventListener("click", () => {
+    modalOverlay.style.display = "flex";
+    memHint.textContent = "Pick a photo + date, then click “Place on wall”.";
+    pendingMemory = null;
+    });
+
+    memCancel.addEventListener("click", () => {
+    modalOverlay.style.display = "none";
+    pendingMemory = null;
+    });
+
+    memPlace.addEventListener("click", async () => {
+    const f = memFile.files && memFile.files[0];
+    const tag = (memTag.value || "").trim().slice(0, 60);
+    const dateStr = memDate.value; // YYYY-MM-DD
+
+    if (!f) return alert("Choose an image.");
+    if (!dateStr) return alert("Select the date the photo was taken.");
+
+    const imageData = await readFileAsDataURL(f);
+
+    pendingMemory = {
+        fileName: f.name,
+        tag,
+        dateStr,
+        imageData
+    };
+
+    memHint.textContent = "Now click anywhere on the wall to place it.";
+});
+
+wall.addEventListener("click", async (ev) => {
+    if (!pendingMemory) return;
+
+    ev.stopPropagation();
+
+    const rect = wall.getBoundingClientRect();
+    const clickX = ev.clientX - rect.left + viewport.scrollLeft;
+    const clickY = ev.clientY - rect.top;
+
+    // timeline X from date (overrides clickX to keep chronological)
+    const dateTs = toTs(pendingMemory.dateStr);
+
+    // find current minTs from items
+    const firstValid = items.find(it => it.sortTs && it.sortTs > 0);
+    const minTs = firstValid ? firstValid.sortTs : dateTs;
+    const pxPerDay = 45;
+    const paddingX = 200;
+    const days = Math.round((dateTs - minTs) / (1000*60*60*24));
+    const x = paddingX + days * pxPerDay;
+
+    const y = Math.max(10, Math.round(clickY - 120));
+
+    // upload via form
+    postViaForm("upload", {
+        fileName: pendingMemory.fileName,
+        tag: pendingMemory.tag,
+        imageData: pendingMemory.imageData,
+        x, y,
+        rot: 0,
+        scale: 1,
+        taken_date: pendingMemory.dateStr
+    });
+
+    modalOverlay.style.display = "none";
+    pendingMemory = null;
 });
 
 jsonpList();
