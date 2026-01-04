@@ -1,0 +1,50 @@
+<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Our Milestone Wall</title>
+    <link rel="stylesheet" href="styles.css" />
+    </head>
+    <body>
+    <div id="topbar">
+        <div class="brand">Milestone Wall</div>
+
+        <div class="uploader">
+        <input id="tagInput" maxlength="60" placeholder="Short tag (e.g., 'First Trip')" />
+        <input id="fileInput" type="file" accept="image/*" />
+        <button id="uploadBtn">Upload</button>
+        </div>
+
+        <div class="controls">
+        <span id="selectedInfo">No photo selected</span>
+        <label>Rotate <input id="rotSlider" type="range" min="-30" max="30" value="0"></label>
+        <label>Scale <input id="scaleSlider" type="range" min="50" max="180" value="100"></label>
+        <input id="editTag" maxlength="60" placeholder="Edit tag"/>
+        <button id="saveTagBtn">Save Tag</button>
+        <button id="deleteBtn" class="danger">Delete</button>
+        </div>
+    </div>
+
+    <div id="viewport">
+        <div id="wall"></div>
+    </div>
+
+    <iframe name="gas_iframe" id="gas_iframe"></iframe>
+
+    <form id="gasForm" target="gas_iframe" method="POST">
+        <input type="hidden" name="action" value="" />
+        <input type="hidden" name="key" value="" />
+        <input type="hidden" name="id" value="" />
+        <input type="hidden" name="fileName" value="" />
+        <input type="hidden" name="tag" value="" />
+        <input type="hidden" name="imageData" value="" />
+        <input type="hidden" name="x" value="" />
+        <input type="hidden" name="y" value="" />
+        <input type="hidden" name="rot" value="" />
+        <input type="hidden" name="scale" value="" />
+    </form>
+
+    <script src="app.js"></script>
+</body>
+</html>
