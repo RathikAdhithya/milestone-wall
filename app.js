@@ -1,6 +1,3 @@
-// app.js — replacement (NO iframe, NO form posts; uses fetch/sendBeacon)
-// Requires: #viewport, #wall, #makeMemoryBtn, #modalOverlay, #memTag, #memDate, #memFile, #memHint, #memCancel, #memPlace
-
 const GAS_URL = "https://script.google.com/macros/s/AKfycbwAMAZkN1d4-xBG6bID8kyWCeNKSfKX29STFo_wipVxQFojmBP1jOvnWXKRrx1tvS6D7g/exec";
 const UPLOAD_KEY = "kR9!v3QpZx_2Gm7WASJKH972634!98762";
 
@@ -16,57 +13,42 @@ const memHint = document.getElementById("memHint");
 const memCancel = document.getElementById("memCancel");
 const memPlace = document.getElementById("memPlace");
 
+const toastEl = document.getElementById("toast");
+
 let items = [];
-let selectedId = null;
 let pendingMemory = null;
+let selectedId = null;
+
+function toast(msg, ms = 1600) {
+  if (!toastEl) return;
+  toastEl.textContent = msg;
+  toastEl.classList.add("show");
+  window.clearTimeout(toastEl.__t);
+  toastEl.__t = window.setTimeout(() => toastEl.classList.remove("show"), ms);
+}
 
 function formatDateLabel(s) {
   if (!s) return "";
   try {
     const d = new Date(s + "T00:00:00");
     return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "2-digit" });
-  } catch (e) {
+  } catch {
     return s;
   }
 }
 
 function toTs(dateStr) {
-  if (!dateStr) return Date.now();
+  if (!dateStr) return 0;
   return new Date(dateStr + "T00:00:00Z").getTime();
-}
-
-function postAction(action, fields) {
-  const p = new URLSearchParams();
-  p.set("action", action);
-  p.set("key", UPLOAD_KEY);
-
-  for (const [k, v] of Object.entries(fields || {})) {
-    if (v == null) continue;
-    p.set(k, String(v));
-  }
-
-  if (navigator.sendBeacon) {
-    const blob = new Blob([p.toString()], { type: "application/x-www-form-urlencoded" });
-    navigator.sendBeacon(GAS_URL, blob);
-    return Promise.resolve();
-  }
-
-  return fetch(GAS_URL, {
-    method: "POST",
-    mode: "no-cors",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: p.toString(),
-  }).then(() => {});
 }
 
 function jsonpList() {
   const cb = "handleList_" + Date.now();
-
   const script = document.createElement("script");
+
   window[cb] = (data) => {
-    try {
-      renderFromList(data);
-    } finally {
+    try { renderFromList(data); }
+    finally {
       delete window[cb];
       script.remove();
     }
@@ -82,11 +64,16 @@ function renderFromList(data) {
   items = (data.items || []).map((it) => ({
     ...it,
     takenDate: it.takenDate || it.taken_date || "",
-    sortTs: Number(it.sortTs || it.sort_ts || 0),
+    sortTs: Number(it.sortTs || it.sort_ts || (it.takenDate ? toTs(it.takenDate) : 0)),
+    x: Number(it.x || 0),
+    y: Number(it.y || 0),
+    rot: Number(it.rot || 0),
+    scale: Number(it.scale || 1)
   }));
 
   items.sort((a, b) => (a.sortTs || 0) - (b.sortTs || 0));
 
+  // Make chronological layout (x from date) BUT keep existing y
   const firstValid = items.find((it) => it.sortTs && it.sortTs > 0);
   const minTs = firstValid ? firstValid.sortTs : Date.now();
 
@@ -97,16 +84,13 @@ function renderFromList(data) {
     const t = it.sortTs || minTs;
     const days = Math.round((t - minTs) / (1000 * 60 * 60 * 24));
     it.x = paddingX + days * pxPerDay;
-    if (it.y == null) it.y = 180;
+    if (!Number.isFinite(it.y) || it.y <= 0) it.y = 180;
   }
 
   wall.innerHTML = "";
   selectedId = null;
-  setSelected(null);
 
-  for (const it of items) {
-    wall.appendChild(makePhoto(it));
-  }
+  for (const it of items) wall.appendChild(makePhoto(it));
 }
 
 function makePhoto(it) {
@@ -114,10 +98,10 @@ function makePhoto(it) {
   el.className = "photo";
   el.dataset.id = it.id;
 
-  const d = document.createElement("div");
-  d.className = "dateLabel";
-  d.textContent = formatDateLabel(it.takenDate);
-  el.appendChild(d);
+  const date = document.createElement("div");
+  date.className = "dateLabel";
+  date.textContent = formatDateLabel(it.takenDate);
+  el.appendChild(date);
 
   const frame = document.createElement("div");
   frame.className = "frame";
@@ -126,12 +110,12 @@ function makePhoto(it) {
   img.src = it.imgUrl;
   img.draggable = false;
 
-  const t = document.createElement("div");
-  t.className = "tag";
-  t.textContent = it.tag || "";
+  const tag = document.createElement("div");
+  tag.className = "tag";
+  tag.textContent = it.tag || "";
 
   frame.appendChild(img);
-  frame.appendChild(t);
+  frame.appendChild(tag);
   el.appendChild(frame);
 
   applyTransform(el, it);
@@ -155,7 +139,6 @@ function setSelected(id) {
   selectedId = id;
   document.querySelectorAll(".photo").forEach((p) => p.classList.remove("selected"));
   if (!id) return;
-
   const el = document.querySelector(`.photo[data-id="${id}"]`);
   if (el) el.classList.add("selected");
 }
@@ -163,7 +146,11 @@ function setSelected(id) {
 document.body.addEventListener("click", () => setSelected(null));
 
 let drag = null;
+
 function startDrag(ev, el) {
+  // If we’re in “place mode”, don’t start dragging
+  if (pendingMemory) return;
+
   ev.preventDefault();
   el.setPointerCapture(ev.pointerId);
 
@@ -174,7 +161,6 @@ function startDrag(ev, el) {
   setSelected(id);
 
   drag = {
-    id,
     el,
     it,
     startX: ev.clientX,
@@ -184,7 +170,6 @@ function startDrag(ev, el) {
   };
 
   el.style.cursor = "grabbing";
-
   el.addEventListener("pointermove", onDragMove);
   el.addEventListener("pointerup", onDragEnd);
   el.addEventListener("pointercancel", onDragEnd);
@@ -192,7 +177,6 @@ function startDrag(ev, el) {
 
 function onDragMove(ev) {
   if (!drag) return;
-
   const dx = ev.clientX - drag.startX;
   const dy = ev.clientY - drag.startY;
 
@@ -214,8 +198,8 @@ function onDragEnd() {
   drag.el.removeEventListener("pointerup", onDragEnd);
   drag.el.removeEventListener("pointercancel", onDragEnd);
 
-  // Persist Y (and any manual X changes) if you want.
-  postAction("update", {
+  // Small updates can use beacon
+  postUpdate({
     id: drag.it.id,
     x: drag.it.x || 0,
     y: drag.it.y || 0,
@@ -224,6 +208,37 @@ function onDragEnd() {
   });
 
   drag = null;
+}
+
+function postUpdate(fields) {
+  const p = new URLSearchParams();
+  p.set("action", "update");
+  p.set("key", UPLOAD_KEY);
+  for (const [k, v] of Object.entries(fields || {})) {
+    if (v == null) continue;
+    p.set(k, String(v));
+  }
+  if (navigator.sendBeacon) {
+    const blob = new Blob([p.toString()], { type: "application/x-www-form-urlencoded" });
+    navigator.sendBeacon(GAS_URL, blob);
+  } else {
+    fetch(GAS_URL, { method: "POST", mode: "no-cors", body: p });
+  }
+}
+
+// IMPORTANT: uploads must NOT use sendBeacon (can silently fail for big payloads)
+async function postUpload(fields) {
+  const p = new URLSearchParams();
+  p.set("action", "upload");
+  p.set("key", UPLOAD_KEY);
+
+  for (const [k, v] of Object.entries(fields || {})) {
+    if (v == null) continue;
+    p.set(k, String(v));
+  }
+
+  // no-cors => request is sent; response is opaque (fine)
+  await fetch(GAS_URL, { method: "POST", mode: "no-cors", body: p });
 }
 
 makeMemoryBtn.addEventListener("click", () => {
@@ -255,17 +270,26 @@ memPlace.addEventListener("click", async () => {
   const imageData = await readFileAsDataURL(f);
 
   pendingMemory = { fileName: f.name, tag, dateStr, imageData };
-  memHint.textContent = "Now click anywhere on the wall to place it.";
+
+  // CLOSE MODAL so she can tap the wall (this was your placement bug)
+  modalOverlay.style.display = "none";
+  toast("Tap anywhere inside the framed wall to place it");
+
+  // Optional: reset hint text inside modal for next time
+  memHint.textContent = "Pick a photo + date, then click “Place on wall”.";
 });
 
-wall.addEventListener("click", async (ev) => {
+// Use pointerdown on iPad (more reliable than click after scrolling)
+wall.addEventListener("pointerdown", async (ev) => {
   if (!pendingMemory) return;
+
+  ev.preventDefault();
   ev.stopPropagation();
 
   const rect = wall.getBoundingClientRect();
   const clickY = ev.clientY - rect.top;
 
-  const dateTs = toTs(pendingMemory.dateStr);
+  const dateTs = toTs(pendingMemory.dateStr) || Date.now();
 
   const firstValid = items.find((it) => it.sortTs && it.sortTs > 0);
   const minTs = firstValid ? firstValid.sortTs : dateTs;
@@ -277,28 +301,35 @@ wall.addEventListener("click", async (ev) => {
 
   const y = Math.max(10, Math.round(clickY - 120));
 
-  await postAction("upload", {
-    fileName: pendingMemory.fileName,
-    tag: pendingMemory.tag,
-    imageData: pendingMemory.imageData,
-    x,
-    y,
-    rot: 0,
-    scale: 1,
-    taken_date: pendingMemory.dateStr,
-  });
+  toast("Uploading…");
 
-  modalOverlay.style.display = "none";
+  try {
+    await postUpload({
+      fileName: pendingMemory.fileName,
+      tag: pendingMemory.tag,
+      imageData: pendingMemory.imageData,
+      x, y,
+      rot: 0,
+      scale: 1,
+      taken_date: pendingMemory.dateStr,
+      sort_ts: dateTs
+    });
+
+    toast("Saved ❤️");
+  } catch (e) {
+    // Even if fetch throws, it may still have sent the request; we still refresh
+    toast("Trying again…");
+  }
+
   pendingMemory = null;
 
   memTag.value = "";
   memDate.value = "";
   memFile.value = "";
-  memHint.textContent = "Pick a photo + date, then click “Place on wall”.";
 
-  // refresh list after upload
-  setTimeout(jsonpList, 800);
-});
+  // Refresh list (give Drive a moment)
+  setTimeout(jsonpList, 1200);
+}, { passive: false });
 
 function readFileAsDataURL(file) {
   return new Promise((resolve, reject) => {

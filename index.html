@@ -1,43 +1,47 @@
 <!doctype html>
 <html>
 <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Our Milestone Wall</title>
-    <link rel="stylesheet" href="styles.css" />
-    </head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Our Milestone Wall</title>
+  <link rel="stylesheet" href="./styles.css?v=1" />
+</head>
 <body>
+  <div id="stage">
     <div id="viewport">
-        <div id="wall"></div>
+      <div id="wall"></div>
     </div>
+  </div>
 
-    <button id="makeMemoryBtn">Make memory</button>
+  <button id="makeMemoryBtn">Make memory</button>
 
-    <div id="modalOverlay">
-        <div id="modal">
-        <h3>Create a memory</h3>
+  <div id="toast" aria-live="polite"></div>
 
-        <div class="row">
-            <input id="memTag" maxlength="60" placeholder="Short tag (e.g., 'First Trip')" />
-        </div>
+  <div id="modalOverlay">
+    <div id="modal">
+      <h3>Create a memory</h3>
 
-        <div class="row">
-            <input id="memDate" type="date" />
-        </div>
+      <div class="row">
+        <input id="memTag" maxlength="60" placeholder="Short tag (e.g., 'First Trip')" />
+      </div>
 
-        <div class="row">
-            <input id="memFile" type="file" accept="image/*" />
-        </div>
+      <div class="row">
+        <input id="memDate" type="date" />
+      </div>
 
-        <div id="memHint">Pick a photo + date, then click “Place on wall”.</div>
+      <div class="row">
+        <input id="memFile" type="file" accept="image/*" />
+      </div>
 
-        <div class="actions">
-            <button id="memCancel">Cancel</button>
-            <button id="memPlace" class="primary">Place on wall</button>
-        </div>
-        </div>
+      <div id="memHint">Pick a photo + date, then click “Place on wall”.</div>
+
+      <div class="actions">
+        <button id="memCancel">Cancel</button>
+        <button id="memPlace" class="primary">Place on wall</button>
+      </div>
     </div>
+  </div>
 
-    <script src="./app.js?v=1"></script>
+  <script src="./app.js?v=2"></script>
 </body>
 </html>
