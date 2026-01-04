@@ -16,6 +16,7 @@ const saveTagBtn = document.getElementById("saveTagBtn");
 const deleteBtn = document.getElementById("deleteBtn");
 
 const gasForm = document.getElementById("gasForm");
+gasForm.setAttribute("action", GAS_URL);
 
 let items = [];
 let selectedId = null;
