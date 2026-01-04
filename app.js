@@ -15,28 +15,19 @@ const memPlace = document.getElementById("memPlace");
 
 const toastEl = document.getElementById("toast");
 
-let lastPlacedX = null;
-
-function scrollToWallX(x, alignClientX = null) {
-  // alignClientX: where on screen (inside viewport) the user tapped
-  const vw = viewport.clientWidth || 1;
-  const target = alignClientX != null
-    ? Math.max(0, x - alignClientX)
-    : Math.max(0, x - vw * 0.5);
-
-  viewport.scrollTo({ left: target, behavior: "smooth" });
-}
-
 let items = [];
 let pendingMemory = null;
-let selectedId = null;
 
-function toast(msg, ms = 1600) {
+// stable base so X-from-date stays consistent during session
+let BASE_TS = null;
+
+// ---- UI helpers ----
+function toast(msg, ms = 1400) {
   if (!toastEl) return;
   toastEl.textContent = msg;
   toastEl.classList.add("show");
-  window.clearTimeout(toastEl.__t);
-  toastEl.__t = window.setTimeout(() => toastEl.classList.remove("show"), ms);
+  clearTimeout(toastEl.__t);
+  toastEl.__t = setTimeout(() => toastEl.classList.remove("show"), ms);
 }
 
 function formatDateLabel(s) {
@@ -54,60 +45,82 @@ function toTs(dateStr) {
   return new Date(dateStr + "T00:00:00Z").getTime();
 }
 
-function jsonpList() {
-  const cb = "handleList_" + Date.now();
-  const script = document.createElement("script");
-
-  window[cb] = (data) => {
-    try { renderFromList(data); }
-    finally {
-      delete window[cb];
-      script.remove();
-    }
-  };
-
-  script.src = `${GAS_URL}?action=list&callback=${cb}&_=${Date.now()}`;
-  document.body.appendChild(script);
+function computeXFromDate(dateTs) {
+  if (!BASE_TS) BASE_TS = dateTs || Date.now();
+  const pxPerDay = 45;
+  const paddingX = 200;
+  const days = Math.round((dateTs - BASE_TS) / (1000 * 60 * 60 * 24));
+  return Math.max(20, paddingX + days * pxPerDay);
 }
 
-function renderFromList(data) {
-  if (!data || !data.ok) return;
+function scrollToWallX(x, tapX = null) {
+  const vw = viewport.clientWidth || 1;
+  const target = tapX != null ? Math.max(0, x - tapX) : Math.max(0, x - vw * 0.5);
+  viewport.scrollTo({ left: target, behavior: "smooth" });
+}
 
-  items = (data.items || []).map((it) => ({
-    ...it,
-    takenDate: it.takenDate || it.taken_date || "",
-    sortTs: Number(it.sortTs || it.sort_ts || (it.takenDate ? toTs(it.takenDate) : 0)),
-    x: Number(it.x || 0),
-    y: Number(it.y || 0),
-    rot: Number(it.rot || 0),
-    scale: Number(it.scale || 1)
-  }));
+// ---- GAS list via hidden iframe + postMessage ----
+let gasFrame = null;
+
+function ensureGasFrame() {
+  if (gasFrame) return gasFrame;
+  gasFrame = document.createElement("iframe");
+  gasFrame.id = "gasFrame";
+  gasFrame.style.display = "none";
+  document.body.appendChild(gasFrame);
+  return gasFrame;
+}
+
+function listViaIframe() {
+  ensureGasFrame();
+  gasFrame.src = `${GAS_URL}?action=list&pm=1&_=${Date.now()}`;
+}
+
+// receive messages from GAS (list / upload / update / delete)
+window.addEventListener("message", (ev) => {
+  const data = ev.data;
+  if (!data || typeof data !== "object") return;
+
+  // list response (from listViaIframe pm=1)
+  if (data.ok && Array.isArray(data.items)) {
+    renderFromList(data);
+    return;
+  }
+
+  // upload/update/delete response (if you ever use those via iframe later)
+  if (data.ok && (data.action === "upload" || data.action === "delete" || data.action === "update")) {
+    setTimeout(listViaIframe, 900);
+  }
+});
+
+function renderFromList(data) {
+  items = (data.items || []).map((it) => {
+    const takenDate = it.takenDate || it.taken_date || "";
+    const sortTs = Number(it.sortTs || it.sort_ts || (takenDate ? toTs(takenDate) : 0));
+    return {
+      ...it,
+      takenDate,
+      sortTs,
+      x: Number(it.x || 0),
+      y: Number(it.y || 0),
+      rot: Number(it.rot || 0),
+      scale: Number(it.scale || 1),
+    };
+  });
 
   items.sort((a, b) => (a.sortTs || 0) - (b.sortTs || 0));
 
-  // Make chronological layout (x from date) BUT keep existing y
   const firstValid = items.find((it) => it.sortTs && it.sortTs > 0);
-  const minTs = firstValid ? firstValid.sortTs : Date.now();
-
-  const pxPerDay = 45;
-  const paddingX = 200;
+  if (firstValid) BASE_TS = firstValid.sortTs;
 
   for (const it of items) {
-    const t = it.sortTs || minTs;
-    const days = Math.round((t - minTs) / (1000 * 60 * 60 * 24));
-    it.x = paddingX + days * pxPerDay;
+    const ts = it.sortTs || BASE_TS || Date.now();
+    it.x = computeXFromDate(ts); // chronological X
     if (!Number.isFinite(it.y) || it.y <= 0) it.y = 180;
   }
 
   wall.innerHTML = "";
-  selectedId = null;
-
   for (const it of items) wall.appendChild(makePhoto(it));
-
-  if (lastPlacedX != null) {
-  scrollToWallX(lastPlacedX);
-  lastPlacedX = null;
-}
 }
 
 function makePhoto(it) {
@@ -135,129 +148,35 @@ function makePhoto(it) {
   frame.appendChild(tag);
   el.appendChild(frame);
 
-  applyTransform(el, it);
-
-  el.addEventListener("pointerdown", (ev) => startDrag(ev, el));
-  el.addEventListener("click", (ev) => {
-    ev.stopPropagation();
-    setSelected(it.id);
-  });
+  el.style.left = (it.x || 0) + "px";
+  el.style.top = (it.y || 0) + "px";
+  el.style.transform = `rotate(${it.rot || 0}deg) scale(${it.scale || 1})`;
 
   return el;
 }
 
-function applyTransform(el, it) {
-  el.style.left = (it.x || 0) + "px";
-  el.style.top = (it.y || 0) + "px";
-  el.style.transform = `rotate(${it.rot || 0}deg) scale(${it.scale || 1})`;
-}
-
-function setSelected(id) {
-  selectedId = id;
-  document.querySelectorAll(".photo").forEach((p) => p.classList.remove("selected"));
-  if (!id) return;
-  const el = document.querySelector(`.photo[data-id="${id}"]`);
-  if (el) el.classList.add("selected");
-}
-
-document.body.addEventListener("click", () => setSelected(null));
-
-let drag = null;
-
-function startDrag(ev, el) {
-  // If we’re in “place mode”, don’t start dragging
-  if (pendingMemory) return;
-
-  ev.preventDefault();
-  el.setPointerCapture(ev.pointerId);
-
-  const id = el.dataset.id;
-  const it = items.find((x) => x.id === id);
-  if (!it) return;
-
-  setSelected(id);
-
-  drag = {
-    el,
-    it,
-    startX: ev.clientX,
-    startY: ev.clientY,
-    origLeft: it.x || 0,
-    origTop: it.y || 0,
-  };
-
-  el.style.cursor = "grabbing";
-  el.addEventListener("pointermove", onDragMove);
-  el.addEventListener("pointerup", onDragEnd);
-  el.addEventListener("pointercancel", onDragEnd);
-}
-
-function onDragMove(ev) {
-  if (!drag) return;
-  const dx = ev.clientX - drag.startX;
-  const dy = ev.clientY - drag.startY;
-
-  const nx = Math.round(drag.origLeft + dx);
-  const ny = Math.round(drag.origTop + dy);
-
-  drag.it.x = nx;
-  drag.it.y = ny;
-
-  drag.el.style.left = nx + "px";
-  drag.el.style.top = ny + "px";
-}
-
-function onDragEnd() {
-  if (!drag) return;
-
-  drag.el.style.cursor = "grab";
-  drag.el.removeEventListener("pointermove", onDragMove);
-  drag.el.removeEventListener("pointerup", onDragEnd);
-  drag.el.removeEventListener("pointercancel", onDragEnd);
-
-  // Small updates can use beacon
-  postUpdate({
-    id: drag.it.id,
-    x: drag.it.x || 0,
-    y: drag.it.y || 0,
-    rot: drag.it.rot || 0,
-    scale: drag.it.scale || 1,
-  });
-
-  drag = null;
-}
-
-function postUpdate(fields) {
-  const p = new URLSearchParams();
-  p.set("action", "update");
-  p.set("key", UPLOAD_KEY);
-  for (const [k, v] of Object.entries(fields || {})) {
-    if (v == null) continue;
-    p.set(k, String(v));
-  }
-  if (navigator.sendBeacon) {
-    const blob = new Blob([p.toString()], { type: "application/x-www-form-urlencoded" });
-    navigator.sendBeacon(GAS_URL, blob);
-  } else {
-    fetch(GAS_URL, { method: "POST", mode: "no-cors", body: p });
-  }
-}
-
-// IMPORTANT: uploads must NOT use sendBeacon (can silently fail for big payloads)
+// ---- POST upload (must use fetch; don’t use beacon for base64) ----
 async function postUpload(fields) {
   const p = new URLSearchParams();
   p.set("action", "upload");
   p.set("key", UPLOAD_KEY);
-
   for (const [k, v] of Object.entries(fields || {})) {
     if (v == null) continue;
     p.set(k, String(v));
   }
-
-  // no-cors => request is sent; response is opaque (fine)
   await fetch(GAS_URL, { method: "POST", mode: "no-cors", body: p });
 }
 
+function readFileAsDataURL(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result || ""));
+    r.onerror = reject;
+    r.readAsDataURL(file);
+  });
+}
+
+// ---- Modal flow ----
 makeMemoryBtn.addEventListener("click", () => {
   modalOverlay.style.display = "flex";
   memHint.textContent = "Pick a photo + date, then click “Place on wall”.";
@@ -285,56 +204,47 @@ memPlace.addEventListener("click", async () => {
   if (!dateStr) return alert("Select the date the photo was taken.");
 
   const imageData = await readFileAsDataURL(f);
+  const previewUrl = URL.createObjectURL(f);
 
-  pendingMemory = { fileName: f.name, tag, dateStr, imageData };
+  pendingMemory = { fileName: f.name, tag, dateStr, imageData, previewUrl };
 
-  // CLOSE MODAL so she can tap the wall (this was your placement bug)
   modalOverlay.style.display = "none";
   toast("Tap anywhere inside the framed wall to place it");
-
-  // Optional: reset hint text inside modal for next time
-  memHint.textContent = "Pick a photo + date, then click “Place on wall”.";
 });
 
-// Use pointerdown on iPad (more reliable than click after scrolling)
+// ---- Place on wall: use pointerdown (best on iPad) ----
 wall.addEventListener("pointerdown", async (ev) => {
   if (!pendingMemory) return;
 
   ev.preventDefault();
   ev.stopPropagation();
 
-  // tap coords relative to the VISIBLE framed area
   const vrect = viewport.getBoundingClientRect();
-  const tapX = ev.clientX - vrect.left;   // 0..viewport width
-  const tapY = ev.clientY - vrect.top;    // 0..viewport height
+  const tapX = ev.clientX - vrect.left;
+  const tapY = ev.clientY - vrect.top;
 
   const dateTs = toTs(pendingMemory.dateStr) || Date.now();
-
-  const firstValid = items.find((it) => it.sortTs && it.sortTs > 0);
-  const minTs = firstValid ? firstValid.sortTs : dateTs;
-
-  const pxPerDay = 45;
-  const paddingX = 200;
-
-  const days = Math.round((dateTs - minTs) / (1000 * 60 * 60 * 24));
-  const x = Math.max(20, paddingX + days * pxPerDay);
-
-  // Y is exactly where she tapped (minus half photo height)
+  const x = computeXFromDate(dateTs);
   const y = Math.max(10, Math.round(tapY - 120));
 
-  // IMPORTANT: bring the date-based X UNDER her tap so it feels placed “where she clicked”
+  // scroll so the chronological X lands under her tap
   scrollToWallX(x, tapX);
-  lastPlacedX = x;
 
-  // Optional: instant ghost preview (so she sees it immediately)
-  const ghost = document.createElement("div");
-  ghost.className = "photo";
-  ghost.style.left = x + "px";
-  ghost.style.top = y + "px";
-  ghost.style.opacity = "0.55";
-  ghost.style.pointerEvents = "none";
-  ghost.innerHTML = `<div class="frame"><div style="height:150px; border-radius:10px; background:rgba(255,255,255,0.12)"></div><div class="tag" style="color:#111">${pendingMemory.tag || ""}</div></div>`;
-  wall.appendChild(ghost);
+  // instant local preview (so it ALWAYS appears where she tapped)
+  const preview = document.createElement("div");
+  preview.className = "photo";
+  preview.style.left = x + "px";
+  preview.style.top = y + "px";
+  preview.style.opacity = "0.9";
+  preview.style.pointerEvents = "none";
+  preview.innerHTML = `
+    <div class="dateLabel">${formatDateLabel(pendingMemory.dateStr)}</div>
+    <div class="frame">
+      <img src="${pendingMemory.previewUrl}" draggable="false" />
+      <div class="tag">${pendingMemory.tag || ""}</div>
+    </div>
+  `;
+  wall.appendChild(preview);
 
   toast("Uploading…");
 
@@ -349,27 +259,26 @@ wall.addEventListener("pointerdown", async (ev) => {
       taken_date: pendingMemory.dateStr,
       sort_ts: dateTs
     });
-
     toast("Saved ❤️");
-  } catch (e) {
-    toast("Saved (refreshing)...");
-  } finally {
-    pendingMemory = null;
-    memTag.value = "";
-    memDate.value = "";
-    memFile.value = "";
-    setTimeout(() => ghost.remove(), 1200);
-    setTimeout(jsonpList, 1200);
+  } catch {
+    toast("Saved (refreshing)…");
   }
+
+  // cleanup + refresh real wall from sheet
+  try { URL.revokeObjectURL(pendingMemory.previewUrl); } catch {}
+  pendingMemory = null;
+
+  memTag.value = "";
+  memDate.value = "";
+  memFile.value = "";
+
+  // refresh list reliably (iframe PM)
+  setTimeout(() => {
+    listViaIframe();
+    // remove preview after real list likely rendered
+    setTimeout(() => preview.remove(), 1200);
+  }, 900);
 }, { passive: false });
 
-function readFileAsDataURL(file) {
-  return new Promise((resolve, reject) => {
-    const r = new FileReader();
-    r.onload = () => resolve(String(r.result || ""));
-    r.onerror = reject;
-    r.readAsDataURL(file);
-  });
-}
-
-jsonpList();
+// initial load
+listViaIframe();
