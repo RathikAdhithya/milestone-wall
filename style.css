@@ -115,3 +115,6 @@ body { margin: 0; background: #0b0b10; color: #fff; overflow: hidden; }
   cursor: pointer;
 }
 #modal .primary{ background: rgba(120, 190, 255, 0.20); border-color: rgba(120, 190, 255, 0.45); }
+
+#viewport { cursor: grab; }
+#viewport.grabbing { cursor: grabbing; }

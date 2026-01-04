@@ -21,6 +21,13 @@ let pendingMemory = null;
 // stable base so X-from-date stays consistent during session
 let BASE_TS = null;
 
+// prevents multiple placements during upload/sync
+let isBusy = false;
+
+// if we placed a preview, keep it until sheet confirms the new item exists
+let awaitingSync = null; 
+// shape: { fileName, tag, sortTs, previewEl, attempts, timerId }
+
 // ---- UI helpers ----
 function toast(msg, ms = 1400) {
   if (!toastEl) return;
@@ -32,7 +39,7 @@ function toast(msg, ms = 1400) {
 
 function ensureWallWidthForX(x) {
   const min = 20000;
-  const needed = Math.ceil(x + 700); // padding on the right
+  const needed = Math.ceil(x + 700); // padding on right
   const cur = wall.offsetWidth || min;
   const next = Math.max(cur, min, needed);
   wall.style.width = next + "px";
@@ -67,6 +74,43 @@ function scrollToWallX(x, tapX = null) {
   viewport.scrollTo({ left: target, behavior: "smooth" });
 }
 
+// ---- Drag-to-pan (click+drag to move around) ----
+let isPanning = false;
+let panStartX = 0;
+let panStartScrollLeft = 0;
+
+viewport.addEventListener("pointerdown", (ev) => {
+  // If we're placing a memory, do NOT pan (tap places it)
+  if (pendingMemory || isBusy) return;
+
+  // If the user clicked a photo, don't start panning here
+  if (ev.target && ev.target.closest && ev.target.closest(".photo")) return;
+
+  isPanning = true;
+  panStartX = ev.clientX;
+  panStartScrollLeft = viewport.scrollLeft;
+
+  try { viewport.setPointerCapture(ev.pointerId); } catch {}
+  viewport.classList.add("grabbing");
+}, { passive: true });
+
+viewport.addEventListener("pointermove", (ev) => {
+  if (!isPanning) return;
+  const dx = ev.clientX - panStartX;
+  viewport.scrollLeft = panStartScrollLeft - dx;
+}, { passive: true });
+
+function endPan(ev) {
+  if (!isPanning) return;
+  isPanning = false;
+  viewport.classList.remove("grabbing");
+  try { viewport.releasePointerCapture(ev.pointerId); } catch {}
+}
+
+viewport.addEventListener("pointerup", endPan, { passive: true });
+viewport.addEventListener("pointercancel", endPan, { passive: true });
+viewport.addEventListener("pointerleave", endPan, { passive: true });
+
 // ---- GAS list via hidden iframe + postMessage ----
 let gasFrame = null;
 
@@ -89,15 +133,13 @@ window.addEventListener("message", (ev) => {
   const data = ev.data;
   if (!data || typeof data !== "object") return;
 
-  // list response (from listViaIframe pm=1)
   if (data.ok && Array.isArray(data.items)) {
     renderFromList(data);
     return;
   }
 
-  // upload/update/delete response (if you ever use those via iframe later)
   if (data.ok && (data.action === "upload" || data.action === "delete" || data.action === "update")) {
-    setTimeout(listViaIframe, 900);
+    setTimeout(listViaIframe, 400);
   }
 });
 
@@ -130,8 +172,29 @@ function renderFromList(data) {
   const maxX = items.reduce((m, it) => Math.max(m, it.x || 0), 0);
   ensureWallWidthForX(maxX);
 
+  // check if we can confirm the last upload exists in list
+  if (awaitingSync) {
+    const found = items.some((it) =>
+      String(it.fileName || "") === awaitingSync.fileName &&
+      String(it.tag || "") === awaitingSync.tag &&
+      Number(it.sortTs || 0) === Number(awaitingSync.sortTs || 0)
+    );
+
+    if (found) {
+      try { awaitingSync.previewEl.remove(); } catch {}
+      clearTimeout(awaitingSync.timerId);
+      awaitingSync = null;
+      isBusy = false;
+    }
+  }
+
   wall.innerHTML = "";
   for (const it of items) wall.appendChild(makePhoto(it));
+
+  // if still awaiting sync, keep preview visible on top
+  if (awaitingSync && awaitingSync.previewEl && !awaitingSync.previewEl.isConnected) {
+    wall.appendChild(awaitingSync.previewEl);
+  }
 }
 
 function makePhoto(it) {
@@ -153,7 +216,7 @@ function makePhoto(it) {
   img.loading = "lazy";
   img.decoding = "async";
 
-  // IMPORTANT: Drive uc?export=view sometimes fails; fallback to thumbnail
+  // Drive uc?export=view can fail; fallback to thumbnail
   img.onerror = () => {
     const fid = encodeURIComponent(it.fileId || "");
     if (fid) img.src = `https://drive.google.com/thumbnail?id=${fid}&sz=w1000`;
@@ -174,7 +237,7 @@ function makePhoto(it) {
   return el;
 }
 
-// ---- POST upload (must use fetch; don’t use beacon for base64) ----
+// ---- POST upload (fetch; opaque response) ----
 async function postUpload(fields) {
   const p = new URLSearchParams();
   p.set("action", "upload");
@@ -183,6 +246,7 @@ async function postUpload(fields) {
     if (v == null) continue;
     p.set(k, String(v));
   }
+  // no-cors => we can't read response, but request will still go through
   await fetch(GAS_URL, { method: "POST", mode: "no-cors", body: p });
 }
 
@@ -195,8 +259,32 @@ function readFileAsDataURL(file) {
   });
 }
 
+function startSyncPolling() {
+  if (!awaitingSync) return;
+  clearTimeout(awaitingSync.timerId);
+
+  const tick = () => {
+    if (!awaitingSync) return;
+
+    awaitingSync.attempts += 1;
+    listViaIframe();
+
+    // after ~20 seconds give up polling, but keep preview so user sees it
+    if (awaitingSync.attempts >= 20) {
+      toast("Saved. If it doesn’t appear, refresh once.", 2200);
+      isBusy = false;
+      return;
+    }
+
+    awaitingSync.timerId = setTimeout(tick, 900);
+  };
+
+  awaitingSync.timerId = setTimeout(tick, 700);
+}
+
 // ---- Modal flow ----
 makeMemoryBtn.addEventListener("click", () => {
+  if (isBusy) return toast("Wait… saving the last one ❤️");
   modalOverlay.style.display = "flex";
   memHint.textContent = "Pick a photo + date, then click “Place on wall”.";
   pendingMemory = null;
@@ -215,6 +303,8 @@ modalOverlay.addEventListener("click", (e) => {
 });
 
 memPlace.addEventListener("click", async () => {
+  if (isBusy) return toast("Wait… saving the last one ❤️");
+
   const f = memFile.files && memFile.files[0];
   const tag = (memTag.value || "").trim().slice(0, 60);
   const dateStr = memDate.value;
@@ -224,87 +314,90 @@ memPlace.addEventListener("click", async () => {
 
   const imageData = await readFileAsDataURL(f);
 
-  // Use DataURL for preview too (no ObjectURL = no revoke issues)
   pendingMemory = { fileName: f.name, tag, dateStr, imageData };
 
   modalOverlay.style.display = "none";
-  toast("Tap anywhere inside the framed wall to place it");
+  toast("Tap anywhere on the wall to place it");
 });
 
-// ---- Place on wall: use pointerdown (best on iPad) ----
-wall.addEventListener(
-  "pointerdown",
-  async (ev) => {
-    if (!pendingMemory) return;
+// ---- Place on wall: tap to place (locked during upload/sync) ----
+wall.addEventListener("pointerdown", async (ev) => {
+  if (!pendingMemory) return;
+  if (isBusy) return;
 
-    ev.preventDefault();
-    ev.stopPropagation();
+  // lock immediately so multiple taps don't create multiple copies
+  isBusy = true;
 
-    const vrect = viewport.getBoundingClientRect();
-    const tapX = ev.clientX - vrect.left;
-    const tapY = ev.clientY - vrect.top;
+  ev.preventDefault();
+  ev.stopPropagation();
 
-    const dateTs = toTs(pendingMemory.dateStr) || Date.now();
-    const x = computeXFromDate(dateTs);
-    const y = Math.max(10, Math.round(tapY - 120));
+  const mem = pendingMemory;
+  pendingMemory = null; // prevents any more placements until we're done
 
-    // scroll so the chronological X lands under her tap
-    scrollToWallX(x, tapX);
+  const vrect = viewport.getBoundingClientRect();
+  const tapX = ev.clientX - vrect.left;
+  const tapY = ev.clientY - vrect.top;
 
-    // ensure wall is wide enough BEFORE placing
-    ensureWallWidthForX(x);
+  const dateTs = toTs(mem.dateStr) || Date.now();
+  const x = computeXFromDate(dateTs);
+  const y = Math.max(10, Math.round(tapY - 120));
 
-    // instant local preview (ALWAYS appears)
-    const preview = document.createElement("div");
-    preview.className = "photo";
-    preview.style.left = x + "px";
-    preview.style.top = y + "px";
-    preview.style.opacity = "0.9";
-    preview.style.pointerEvents = "none";
-    preview.innerHTML = `
-      <div class="dateLabel">${formatDateLabel(pendingMemory.dateStr)}</div>
-      <div class="frame">
-        <img src="${pendingMemory.imageData}" draggable="false" />
-        <div class="tag">${pendingMemory.tag || ""}</div>
-      </div>
-    `;
-    wall.appendChild(preview);
+  // scroll so chronological X lands under her tap
+  scrollToWallX(x, tapX);
+  ensureWallWidthForX(x);
 
-    toast("Uploading…");
+  // create preview that stays UNTIL list confirms the upload exists
+  const preview = document.createElement("div");
+  preview.className = "photo";
+  preview.style.left = x + "px";
+  preview.style.top = y + "px";
+  preview.style.opacity = "0.98";
+  preview.style.pointerEvents = "none";
+  preview.innerHTML = `
+    <div class="dateLabel">${formatDateLabel(mem.dateStr)}</div>
+    <div class="frame">
+      <img src="${mem.imageData}" draggable="false" />
+      <div class="tag">${mem.tag || ""}</div>
+    </div>
+  `;
+  wall.appendChild(preview);
 
-    try {
-      await postUpload({
-        fileName: pendingMemory.fileName,
-        tag: pendingMemory.tag,
-        imageData: pendingMemory.imageData,
-        x,
-        y,
-        rot: 0,
-        scale: 1,
-        taken_date: pendingMemory.dateStr,
-        sort_ts: dateTs,
-      });
-      toast("Saved ❤️");
-    } catch {
-      toast("Saved (refreshing)…");
-    }
+  awaitingSync = {
+    fileName: mem.fileName,
+    tag: mem.tag,
+    sortTs: dateTs,
+    previewEl: preview,
+    attempts: 0,
+    timerId: null
+  };
 
-    // cleanup + refresh real wall from sheet
-    pendingMemory = null;
+  toast("Uploading…");
 
-    memTag.value = "";
-    memDate.value = "";
-    memFile.value = "";
+  try {
+    await postUpload({
+      fileName: mem.fileName,
+      tag: mem.tag,
+      imageData: mem.imageData,
+      x, y,
+      rot: 0,
+      scale: 1,
+      taken_date: mem.dateStr,
+      sort_ts: dateTs
+    });
 
-    // refresh list reliably (iframe PM)
-    setTimeout(() => {
-      listViaIframe();
-      // remove preview after real list likely rendered
-      setTimeout(() => preview.remove(), 1200);
-    }, 900);
-  },
-  { passive: false }
-);
+    toast("Saved ❤️");
+  } catch {
+    // fetch no-cors usually won't throw, but keep safe
+    toast("Saved. If it disappears, refresh.", 2200);
+  }
+
+  memTag.value = "";
+  memDate.value = "";
+  memFile.value = "";
+
+  // start polling list until the new row is visible, then remove preview
+  startSyncPolling();
+}, { passive: false });
 
 // initial load
 listViaIframe();
