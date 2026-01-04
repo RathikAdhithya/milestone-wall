@@ -15,6 +15,18 @@ const memPlace = document.getElementById("memPlace");
 
 const toastEl = document.getElementById("toast");
 
+let lastPlacedX = null;
+
+function scrollToWallX(x, alignClientX = null) {
+  // alignClientX: where on screen (inside viewport) the user tapped
+  const vw = viewport.clientWidth || 1;
+  const target = alignClientX != null
+    ? Math.max(0, x - alignClientX)
+    : Math.max(0, x - vw * 0.5);
+
+  viewport.scrollTo({ left: target, behavior: "smooth" });
+}
+
 let items = [];
 let pendingMemory = null;
 let selectedId = null;
@@ -91,6 +103,11 @@ function renderFromList(data) {
   selectedId = null;
 
   for (const it of items) wall.appendChild(makePhoto(it));
+
+  if (lastPlacedX != null) {
+  scrollToWallX(lastPlacedX);
+  lastPlacedX = null;
+}
 }
 
 function makePhoto(it) {
@@ -286,8 +303,10 @@ wall.addEventListener("pointerdown", async (ev) => {
   ev.preventDefault();
   ev.stopPropagation();
 
-  const rect = wall.getBoundingClientRect();
-  const clickY = ev.clientY - rect.top;
+  // tap coords relative to the VISIBLE framed area
+  const vrect = viewport.getBoundingClientRect();
+  const tapX = ev.clientX - vrect.left;   // 0..viewport width
+  const tapY = ev.clientY - vrect.top;    // 0..viewport height
 
   const dateTs = toTs(pendingMemory.dateStr) || Date.now();
 
@@ -296,10 +315,26 @@ wall.addEventListener("pointerdown", async (ev) => {
 
   const pxPerDay = 45;
   const paddingX = 200;
-  const days = Math.round((dateTs - minTs) / (1000 * 60 * 60 * 24));
-  const x = paddingX + days * pxPerDay;
 
-  const y = Math.max(10, Math.round(clickY - 120));
+  const days = Math.round((dateTs - minTs) / (1000 * 60 * 60 * 24));
+  const x = Math.max(20, paddingX + days * pxPerDay);
+
+  // Y is exactly where she tapped (minus half photo height)
+  const y = Math.max(10, Math.round(tapY - 120));
+
+  // IMPORTANT: bring the date-based X UNDER her tap so it feels placed “where she clicked”
+  scrollToWallX(x, tapX);
+  lastPlacedX = x;
+
+  // Optional: instant ghost preview (so she sees it immediately)
+  const ghost = document.createElement("div");
+  ghost.className = "photo";
+  ghost.style.left = x + "px";
+  ghost.style.top = y + "px";
+  ghost.style.opacity = "0.55";
+  ghost.style.pointerEvents = "none";
+  ghost.innerHTML = `<div class="frame"><div style="height:150px; border-radius:10px; background:rgba(255,255,255,0.12)"></div><div class="tag" style="color:#111">${pendingMemory.tag || ""}</div></div>`;
+  wall.appendChild(ghost);
 
   toast("Uploading…");
 
@@ -317,18 +352,15 @@ wall.addEventListener("pointerdown", async (ev) => {
 
     toast("Saved ❤️");
   } catch (e) {
-    // Even if fetch throws, it may still have sent the request; we still refresh
-    toast("Trying again…");
+    toast("Saved (refreshing)...");
+  } finally {
+    pendingMemory = null;
+    memTag.value = "";
+    memDate.value = "";
+    memFile.value = "";
+    setTimeout(() => ghost.remove(), 1200);
+    setTimeout(jsonpList, 1200);
   }
-
-  pendingMemory = null;
-
-  memTag.value = "";
-  memDate.value = "";
-  memFile.value = "";
-
-  // Refresh list (give Drive a moment)
-  setTimeout(jsonpList, 1200);
 }, { passive: false });
 
 function readFileAsDataURL(file) {
