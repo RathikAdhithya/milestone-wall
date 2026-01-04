@@ -30,6 +30,14 @@ function toast(msg, ms = 1400) {
   toastEl.__t = setTimeout(() => toastEl.classList.remove("show"), ms);
 }
 
+function ensureWallWidthForX(x) {
+  const min = 20000;
+  const needed = Math.ceil(x + 700); // padding on the right
+  const cur = wall.offsetWidth || min;
+  const next = Math.max(cur, min, needed);
+  wall.style.width = next + "px";
+}
+
 function formatDateLabel(s) {
   if (!s) return "";
   try {
@@ -119,6 +127,9 @@ function renderFromList(data) {
     if (!Number.isFinite(it.y) || it.y <= 0) it.y = 180;
   }
 
+  const maxX = items.reduce((m, it) => Math.max(m, it.x || 0), 0);
+  ensureWallWidthForX(maxX);
+
   wall.innerHTML = "";
   for (const it of items) wall.appendChild(makePhoto(it));
 }
@@ -139,6 +150,14 @@ function makePhoto(it) {
   const img = document.createElement("img");
   img.src = it.imgUrl;
   img.draggable = false;
+  img.loading = "lazy";
+  img.decoding = "async";
+
+  // IMPORTANT: Drive uc?export=view sometimes fails; fallback to thumbnail
+  img.onerror = () => {
+    const fid = encodeURIComponent(it.fileId || "");
+    if (fid) img.src = `https://drive.google.com/thumbnail?id=${fid}&sz=w1000`;
+  };
 
   const tag = document.createElement("div");
   tag.className = "tag";
@@ -204,81 +223,88 @@ memPlace.addEventListener("click", async () => {
   if (!dateStr) return alert("Select the date the photo was taken.");
 
   const imageData = await readFileAsDataURL(f);
-  const previewUrl = URL.createObjectURL(f);
 
-  pendingMemory = { fileName: f.name, tag, dateStr, imageData, previewUrl };
+  // Use DataURL for preview too (no ObjectURL = no revoke issues)
+  pendingMemory = { fileName: f.name, tag, dateStr, imageData };
 
   modalOverlay.style.display = "none";
   toast("Tap anywhere inside the framed wall to place it");
 });
 
 // ---- Place on wall: use pointerdown (best on iPad) ----
-wall.addEventListener("pointerdown", async (ev) => {
-  if (!pendingMemory) return;
+wall.addEventListener(
+  "pointerdown",
+  async (ev) => {
+    if (!pendingMemory) return;
 
-  ev.preventDefault();
-  ev.stopPropagation();
+    ev.preventDefault();
+    ev.stopPropagation();
 
-  const vrect = viewport.getBoundingClientRect();
-  const tapX = ev.clientX - vrect.left;
-  const tapY = ev.clientY - vrect.top;
+    const vrect = viewport.getBoundingClientRect();
+    const tapX = ev.clientX - vrect.left;
+    const tapY = ev.clientY - vrect.top;
 
-  const dateTs = toTs(pendingMemory.dateStr) || Date.now();
-  const x = computeXFromDate(dateTs);
-  const y = Math.max(10, Math.round(tapY - 120));
+    const dateTs = toTs(pendingMemory.dateStr) || Date.now();
+    const x = computeXFromDate(dateTs);
+    const y = Math.max(10, Math.round(tapY - 120));
 
-  // scroll so the chronological X lands under her tap
-  scrollToWallX(x, tapX);
+    // scroll so the chronological X lands under her tap
+    scrollToWallX(x, tapX);
 
-  // instant local preview (so it ALWAYS appears where she tapped)
-  const preview = document.createElement("div");
-  preview.className = "photo";
-  preview.style.left = x + "px";
-  preview.style.top = y + "px";
-  preview.style.opacity = "0.9";
-  preview.style.pointerEvents = "none";
-  preview.innerHTML = `
-    <div class="dateLabel">${formatDateLabel(pendingMemory.dateStr)}</div>
-    <div class="frame">
-      <img src="${pendingMemory.previewUrl}" draggable="false" />
-      <div class="tag">${pendingMemory.tag || ""}</div>
-    </div>
-  `;
-  wall.appendChild(preview);
+    // ensure wall is wide enough BEFORE placing
+    ensureWallWidthForX(x);
 
-  toast("Uploading…");
+    // instant local preview (ALWAYS appears)
+    const preview = document.createElement("div");
+    preview.className = "photo";
+    preview.style.left = x + "px";
+    preview.style.top = y + "px";
+    preview.style.opacity = "0.9";
+    preview.style.pointerEvents = "none";
+    preview.innerHTML = `
+      <div class="dateLabel">${formatDateLabel(pendingMemory.dateStr)}</div>
+      <div class="frame">
+        <img src="${pendingMemory.imageData}" draggable="false" />
+        <div class="tag">${pendingMemory.tag || ""}</div>
+      </div>
+    `;
+    wall.appendChild(preview);
 
-  try {
-    await postUpload({
-      fileName: pendingMemory.fileName,
-      tag: pendingMemory.tag,
-      imageData: pendingMemory.imageData,
-      x, y,
-      rot: 0,
-      scale: 1,
-      taken_date: pendingMemory.dateStr,
-      sort_ts: dateTs
-    });
-    toast("Saved ❤️");
-  } catch {
-    toast("Saved (refreshing)…");
-  }
+    toast("Uploading…");
 
-  // cleanup + refresh real wall from sheet
-  try { URL.revokeObjectURL(pendingMemory.previewUrl); } catch {}
-  pendingMemory = null;
+    try {
+      await postUpload({
+        fileName: pendingMemory.fileName,
+        tag: pendingMemory.tag,
+        imageData: pendingMemory.imageData,
+        x,
+        y,
+        rot: 0,
+        scale: 1,
+        taken_date: pendingMemory.dateStr,
+        sort_ts: dateTs,
+      });
+      toast("Saved ❤️");
+    } catch {
+      toast("Saved (refreshing)…");
+    }
 
-  memTag.value = "";
-  memDate.value = "";
-  memFile.value = "";
+    // cleanup + refresh real wall from sheet
+    pendingMemory = null;
 
-  // refresh list reliably (iframe PM)
-  setTimeout(() => {
-    listViaIframe();
-    // remove preview after real list likely rendered
-    setTimeout(() => preview.remove(), 1200);
-  }, 900);
-}, { passive: false });
+    memTag.value = "";
+    memDate.value = "";
+    memFile.value = "";
+
+    // refresh list reliably (iframe PM)
+    setTimeout(() => {
+      listViaIframe();
+      // remove preview after real list likely rendered
+      setTimeout(() => preview.remove(), 1200);
+    }, 900);
+  },
+  { passive: false }
+);
 
 // initial load
 listViaIframe();
