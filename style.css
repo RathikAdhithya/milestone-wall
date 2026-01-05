@@ -2,7 +2,7 @@
 html, body { height: 100%; }
 body { margin: 0; background: #0b0b10; color: #fff; overflow: hidden; }
 
-/* VIEWPORT (scrollable canvas) */
+/* VIEWPORT */
 #viewport{
   position: fixed;
   inset: 0;
@@ -10,7 +10,7 @@ body { margin: 0; background: #0b0b10; color: #fff; overflow: hidden; }
   overflow-y: scroll;
   -webkit-overflow-scrolling: touch;
   scrollbar-width: none;
-  touch-action: none;         /* critical for iPad drag-pan */
+  touch-action: none;
   cursor: grab;
 }
 #viewport::-webkit-scrollbar{ display:none; }
@@ -47,7 +47,7 @@ body { margin: 0; background: #0b0b10; color: #fff; overflow: hidden; }
 .tag{
   margin-top: 8px;
   color: #111;
-  font-weight: 700;
+  font-weight: 800;
   font-size: 13px;
   text-align: center;
   overflow: hidden;
@@ -110,7 +110,7 @@ body { margin: 0; background: #0b0b10; color: #fff; overflow: hidden; }
   z-index: 90;
 }
 #modal{
-  width: min(520px, calc(100vw - 24px));
+  width: min(560px, calc(100vw - 24px));
   background: rgba(15,15,25,0.96);
   border: 1px solid rgba(255,255,255,0.12);
   border-radius: 18px;
@@ -119,7 +119,7 @@ body { margin: 0; background: #0b0b10; color: #fff; overflow: hidden; }
 }
 #modal h3{ margin: 0 0 10px 0; }
 #modal .row{ display:flex; gap:10px; margin: 10px 0; }
-#modal input{
+#modal input, #modal textarea{
   width: 100%;
   background: rgba(255,255,255,0.06);
   border: 1px solid rgba(255,255,255,0.12);
@@ -128,6 +128,7 @@ body { margin: 0; background: #0b0b10; color: #fff; overflow: hidden; }
   border-radius: 12px;
   outline: none;
 }
+#modal textarea{ min-height: 92px; resize: vertical; }
 #memHint{ opacity:0.85; font-size:12px; line-height:1.3; }
 #modal .actions{ display:flex; gap:10px; justify-content:flex-end; margin-top: 12px; }
 #modal button{
@@ -154,7 +155,7 @@ body { margin: 0; background: #0b0b10; color: #fff; overflow: hidden; }
   z-index: 120;
 }
 #detailModal{
-  width: min(980px, calc(100vw - 18px));
+  width: min(1020px, calc(100vw - 18px));
   background: rgba(15,15,25,0.98);
   border: 1px solid rgba(255,255,255,0.12);
   border-radius: 18px;
@@ -232,7 +233,7 @@ body { margin: 0; background: #0b0b10; color: #fff; overflow: hidden; }
   opacity: 0.9;
   font-weight: 800;
 }
-.detailForm input{
+.detailForm input, .detailForm textarea{
   width: 100%;
   background: rgba(255,255,255,0.06);
   border: 1px solid rgba(255,255,255,0.12);
@@ -241,6 +242,8 @@ body { margin: 0; background: #0b0b10; color: #fff; overflow: hidden; }
   border-radius: 12px;
   outline: none;
 }
+.detailForm textarea{ min-height: 140px; resize: vertical; }
+
 .mini{
   font-size: 12px;
   opacity: 0.85;

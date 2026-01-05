@@ -1,4 +1,4 @@
-const APP_VER = "2026-01-06_free_pan_drag_snap_details_v1";
+const APP_VER = "2026-01-06_story_fix_modal_img_v1";
 console.log("Milestone Wall loaded:", APP_VER);
 
 const GAS_URL = "https://script.google.com/macros/s/AKfycbwAMAZkN1d4-xBG6bID8kyWCeNKSfKX29STFo_wipVxQFojmBP1jOvnWXKRrx1tvS6D7g/exec";
@@ -9,7 +9,8 @@ const viewport = document.getElementById("viewport");
 
 const makeMemoryBtn = document.getElementById("makeMemoryBtn");
 const modalOverlay = document.getElementById("modalOverlay");
-const memTag = document.getElementById("memTag");
+const memTag = document.getElementById("memTag");       // Name
+const memStory = document.getElementById("memStory");   // Story
 const memDate = document.getElementById("memDate");
 const memFile = document.getElementById("memFile");
 const memHint = document.getElementById("memHint");
@@ -20,7 +21,8 @@ const toastEl = document.getElementById("toast");
 // Details modal
 const detailOverlay = document.getElementById("detailOverlay");
 const detImg = document.getElementById("detImg");
-const detTag = document.getElementById("detTag");
+const detName = document.getElementById("detName");
+const detStory = document.getElementById("detStory");
 const detDate = document.getElementById("detDate");
 const detHint = document.getElementById("detHint");
 const detFileName = document.getElementById("detFileName");
@@ -35,7 +37,7 @@ const detDatePill = document.getElementById("detDatePill");
 // Snap config
 const SNAP_Y = 20;
 const X_SNAP_THRESHOLD = 30;
-const TAP_SLOP = 7; // px; tap vs drag threshold
+const TAP_SLOP = 7;
 
 let items = [];
 let pendingMemory = null;
@@ -44,8 +46,7 @@ let BASE_TS = null;
 let isBusy = false;
 let wallLoaded = false;
 let detailsOpen = false;
-
-let selected = null; // { it, el }
+let selected = null;
 
 // spacing so consecutive dates never overlap
 const CARD_W = 240;
@@ -116,7 +117,6 @@ function scrollToWallX(x, tapX = null) {
   viewport.scrollTo({ left: target, behavior: "smooth" });
 }
 
-// helpers
 function dayIndexFromX(x) {
   return Math.round((x - PADDING_X) / PX_PER_DAY);
 }
@@ -135,6 +135,25 @@ function snapY(y) {
   return Math.max(10, Math.min(maxY, sy));
 }
 
+function driveThumbUrl(fileId, size = 2000) {
+  return `https://drive.google.com/thumbnail?id=${encodeURIComponent(fileId)}&sz=w${size}`;
+}
+function driveUcViewUrl(fileId) {
+  return `https://drive.google.com/uc?export=view&id=${encodeURIComponent(fileId)}`;
+}
+function driveViewPageUrl(fileId) {
+  return `https://drive.google.com/file/d/${encodeURIComponent(fileId)}/view`;
+}
+
+function makeStoredFileName(name, original) {
+  const n = String(name || "").trim();
+  const orig = String(original || "memory.jpg");
+  const m = orig.match(/(\.[a-zA-Z0-9]+)$/);
+  const ext = m ? m[1] : ".jpg";
+  if (!n) return orig;
+  return n.replace(/[\/\\:*?"<>|]+/g, " ").trim().slice(0,80) + ext;
+}
+
 function findElById_(id) {
   return wall.querySelector(`.photo[data-id="${CSS.escape(String(id))}"]`);
 }
@@ -148,6 +167,8 @@ let panStartX = 0;
 let panStartY = 0;
 let panStartScrollLeft = 0;
 let panStartScrollTop = 0;
+
+let drag = null;
 
 function canPanStart_(ev) {
   if (detailsOpen) return false;
@@ -191,11 +212,8 @@ window.addEventListener("pointerup", panEnd_, { passive: false });
 window.addEventListener("pointercancel", panEnd_, { passive: false });
 
 // -----------------------
-// DRAG PHOTO (snap Y + snap date column)
-// TAP PHOTO -> open details modal
+// DETAILS MODAL
 // -----------------------
-let drag = null;
-
 function openDetails_(it) {
   if (!it) return;
   detailsOpen = true;
@@ -203,8 +221,14 @@ function openDetails_(it) {
   const el = findElById_(it.id);
   selected = { it, el };
 
-  detImg.src = it.imgUrl || "";
-  detTag.value = (it.tag || "").slice(0,60);
+  // Modal image: use thumbnail first (reliable), fallback to uc view
+  detImg.src = it.fileId ? driveThumbUrl(it.fileId, 2400) : (it.imgUrl || "");
+  detImg.onerror = () => {
+    if (it.fileId) detImg.src = driveUcViewUrl(it.fileId);
+  };
+
+  detName.value = (it.tag || "").slice(0,60);
+  detStory.value = (it.story || "").slice(0,2000);
 
   const dISO = it.takenDate || (it.sortTs ? isoFromTs(it.sortTs) : "");
   detDate.value = dISO || "";
@@ -212,8 +236,8 @@ function openDetails_(it) {
   detDatePill.textContent = formatDateLabel(detDate.value || dISO);
   detHint.textContent = "";
 
-  detFileName.textContent = it.fileName || it.file_name || "—";
-  detCreatedAt.textContent = it.createdAt || it.created_at || "—";
+  detFileName.textContent = it.fileName || "—";
+  detCreatedAt.textContent = it.createdAt || "—";
   detId.textContent = it.id || "—";
 
   detailOverlay.style.display = "flex";
@@ -249,8 +273,8 @@ detDate.addEventListener("change", updateDetailsHint_);
 
 detOpen.addEventListener("click", () => {
   if (!selected || !selected.it) return;
-  const url = selected.it.imgUrl || "";
-  if (url) window.open(url, "_blank");
+  const fid = selected.it.fileId;
+  if (fid) window.open(driveViewPageUrl(fid), "_blank");
 });
 
 detSave.addEventListener("click", async () => {
@@ -261,7 +285,8 @@ detSave.addEventListener("click", async () => {
   const it = selected.it;
   const el = selected.el || findElById_(it.id);
 
-  const newTag = (detTag.value || "").trim().slice(0,60);
+  const newName = (detName.value || "").trim().slice(0,60);
+  const newStory = (detStory.value || "").trim().slice(0,2000);
   const newDateStr = detDate.value;
 
   if (!newDateStr) {
@@ -273,7 +298,8 @@ detSave.addEventListener("click", async () => {
   const newX = computeXFromDate(newTs);
   const newY = snapY(Number(it.y || 180));
 
-  it.tag = newTag;
+  it.tag = newName;         // Name = tag
+  it.story = newStory;      // Story = story
   it.takenDate = newDateStr;
   it.sortTs = newTs;
   it.x = newX;
@@ -285,7 +311,7 @@ detSave.addEventListener("click", async () => {
     el.style.zIndex = String(100000 + Math.floor(newTs / 86400000));
 
     const tagEl = el.querySelector(".tag");
-    if (tagEl) tagEl.textContent = newTag;
+    if (tagEl) tagEl.textContent = newName;
 
     const dateEl = el.querySelector(".dateLabel");
     if (dateEl) dateEl.textContent = formatDateLabel(newDateStr);
@@ -298,7 +324,8 @@ detSave.addEventListener("click", async () => {
   try {
     await postUpdate({
       id: it.id,
-      tag: newTag,
+      tag: newName,
+      story: newStory,
       x: newX,
       y: newY,
       taken_date: newDateStr,
@@ -324,11 +351,8 @@ detDelete.addEventListener("click", async () => {
   if (!confirm("Delete this memory?")) return;
 
   isBusy = true;
-  try {
-    await postDelete(it.id);
-  } catch {}
+  try { await postDelete(it.id); } catch {}
 
-  // remove locally
   items = items.filter(x => x.id !== it.id);
   const el = selected.el || findElById_(it.id);
   try { if (el) el.remove(); } catch {}
@@ -339,6 +363,9 @@ detDelete.addEventListener("click", async () => {
   setTimeout(() => listViaJsonp(), 400);
 });
 
+// -----------------------
+// DRAG PHOTO (snap Y + date column) / TAP => open details
+// -----------------------
 wall.addEventListener("pointerdown", (ev) => {
   if (detailsOpen) return;
   if (pendingMemory || isBusy) return;
@@ -363,7 +390,7 @@ wall.addEventListener("pointerdown", (ev) => {
     curDayIdx: dayIndexFromX(Number(it.x || 0)),
     curX: Number(it.x || 0),
     curY: Number(it.y || 0),
-    active: false,        // becomes true after movement threshold
+    active: false,
   };
 
   try { card.setPointerCapture(ev.pointerId); } catch {}
@@ -378,7 +405,7 @@ wall.addEventListener("pointermove", (ev) => {
   const dy = ev.clientY - drag.startClientY;
 
   if (!drag.active) {
-    if (Math.hypot(dx, dy) < TAP_SLOP) return; // still a tap
+    if (Math.hypot(dx, dy) < TAP_SLOP) return;
     drag.active = true;
     drag.el.classList.add("dragging");
     drag.el.style.zIndex = "999999";
@@ -409,7 +436,7 @@ wall.addEventListener("pointermove", (ev) => {
   ev.preventDefault();
 }, { passive: false });
 
-async function finishDrag_(ev, canceled = false) {
+async function finishDrag_(ev) {
   if (!drag) return;
 
   const d = drag;
@@ -417,7 +444,7 @@ async function finishDrag_(ev, canceled = false) {
 
   try { d.el.releasePointerCapture(ev.pointerId); } catch {}
 
-  // TAP -> open details
+  // TAP => open details
   if (!d.active) {
     openDetails_(d.it);
     return;
@@ -448,13 +475,14 @@ async function finishDrag_(ev, canceled = false) {
     toast("Moved (refresh if needed)", 2000);
   }
 
-  if (!canceled) setTimeout(() => listViaJsonp(), 250);
+  setTimeout(() => listViaJsonp(), 250);
 }
-wall.addEventListener("pointerup", (ev) => finishDrag_(ev, false), { passive: false });
-wall.addEventListener("pointercancel", (ev) => finishDrag_(ev, true), { passive: false });
+
+wall.addEventListener("pointerup", finishDrag_, { passive: false });
+wall.addEventListener("pointercancel", finishDrag_, { passive: false });
 
 // -----------------------
-// LIST VIA JSONP (GitHub Pages friendly)
+// LIST VIA JSONP
 // -----------------------
 function listViaJsonp(retry = 0) {
   const cb = "__mw_list_cb_" + Date.now() + "_" + Math.random().toString(16).slice(2);
@@ -510,6 +538,7 @@ function normalizeItem(it) {
   const fileId = String(it.fileId || it.file_id || "");
   const fileName = String(it.fileName || it.file_name || "");
   const tag = String(it.tag || "");
+  const story = String(it.story || it.story_text || "");
   const createdAt = String(it.createdAt || it.created_at || "");
 
   const takenDate = String(it.takenDate || it.taken_date || "");
@@ -525,9 +554,11 @@ function normalizeItem(it) {
 
   const rot = Number(it.rot || 0);
   const scale = Number(it.scale || 1);
-  const imgUrl = String(it.imgUrl || it.img_url || (fileId ? `https://drive.google.com/uc?export=view&id=${encodeURIComponent(fileId)}` : ""));
 
-  return { id, fileId, fileName, tag, createdAt, takenDate, sortTs, x, y, rot, scale, imgUrl };
+  // wall image can stay uc view; modal uses thumbnail for reliability
+  const imgUrl = fileId ? driveUcViewUrl(fileId) : String(it.imgUrl || it.img_url || "");
+
+  return { id, fileId, fileName, tag, story, createdAt, takenDate, sortTs, x, y, rot, scale, imgUrl };
 }
 
 function renderFromList(rawItems) {
@@ -580,7 +611,7 @@ function makePhoto(it) {
   img.decoding = "async";
   img.onerror = () => {
     const fid = encodeURIComponent(it.fileId || "");
-    if (fid) img.src = `https://drive.google.com/thumbnail?id=${fid}&sz=w1200`;
+    if (fid) img.src = driveThumbUrl(fid, 1200);
   };
 
   const tag = document.createElement("div");
@@ -674,18 +705,22 @@ memPlace.addEventListener("click", async () => {
   if (isBusy) return toast("Wait… saving ❤️");
 
   const f = memFile.files && memFile.files[0];
-  const tag = (memTag.value || "").trim().slice(0, 60);
+  const name = (memTag.value || "").trim().slice(0, 60);
+  const story = (memStory.value || "").trim().slice(0, 2000);
   const dateStr = memDate.value;
 
   if (!f) return alert("Choose an image.");
   if (!dateStr) return alert("Select the date the photo was taken.");
+  if (!name) return alert("Enter a Name (this shows on the card).");
 
   const imageData = await readFileAsDataURL(f);
 
   pendingMemory = {
     clientId: newClientId(),
-    fileName: f.name,
-    tag,
+    originalFileName: f.name,
+    storedFileName: makeStoredFileName(name, f.name),
+    name,
+    story,
     dateStr,
     imageData
   };
@@ -695,7 +730,7 @@ memPlace.addEventListener("click", async () => {
 });
 
 // -----------------------
-// PLACE ON WALL (single-tap)
+// PLACE ON WALL
 // -----------------------
 wall.addEventListener("pointerdown", async (ev) => {
   if (!pendingMemory) return;
@@ -732,7 +767,7 @@ wall.addEventListener("pointerdown", async (ev) => {
     <div class="dateLabel">${formatDateLabel(mem.dateStr)}</div>
     <div class="frame">
       <img src="${mem.imageData}" draggable="false" />
-      <div class="tag">${mem.tag || ""}</div>
+      <div class="tag">${mem.name || ""}</div>
     </div>
   `;
   wall.appendChild(preview);
@@ -742,15 +777,26 @@ wall.addEventListener("pointerdown", async (ev) => {
   try {
     await postUpload({
       client_id: mem.clientId,
-      file_name: mem.fileName,
-      fileName: mem.fileName,
-      tag: mem.tag,
+
+      // Store Drive file name as "Name.ext"
+      file_name: mem.storedFileName,
+      fileName: mem.storedFileName,
+
+      // Name shown on wall
+      tag: mem.name,
+
+      // Story is separate
+      story: mem.story,
+
       imageData: mem.imageData,
+
       x, y,
       rot: 0,
       scale: 1,
+
       taken_date: mem.dateStr,
       takenDate: mem.dateStr,
+
       sort_ts: dateTs,
       sortTs: dateTs
     });
@@ -761,6 +807,7 @@ wall.addEventListener("pointerdown", async (ev) => {
   }
 
   memTag.value = "";
+  memStory.value = "";
   memDate.value = "";
   memFile.value = "";
 
