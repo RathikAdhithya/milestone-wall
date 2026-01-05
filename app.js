@@ -18,20 +18,11 @@ const toastEl = document.getElementById("toast");
 let items = [];
 let pendingMemory = null;
 
-// stable base so X-from-date stays consistent during session
-let BASE_TS = null;
+let BASE_TS = null;          // stable for the whole session
+let isBusy = false;          // prevents multi-tap duplicates during upload/sync
+let awaitingSync = null;     // { fileName, tag, sortTs, y, previewEl, attempts, timerId }
 
-// set true after first successful list load
-let HAS_LOADED = false;
-
-// prevents multiple placements during upload/sync
-let isBusy = false;
-
-// if we placed a preview, keep it until sheet confirms the new item exists
-let awaitingSync = null;
-// shape: { fileName, tag, sortTs, y, previewEl, attempts, timerId }
-
-// ---- UI helpers ----
+// ---- UI ----
 function toast(msg, ms = 1400) {
   if (!toastEl) return;
   toastEl.textContent = msg;
@@ -77,16 +68,13 @@ function scrollToWallX(x, tapX = null) {
   viewport.scrollTo({ left: target, behavior: "smooth" });
 }
 
-// ---- Drag-to-pan (click+drag to move around) ----
+// ---- Drag-to-pan ----
 let isPanning = false;
 let panStartX = 0;
 let panStartScrollLeft = 0;
 
 viewport.addEventListener("pointerdown", (ev) => {
-  // If we're placing a memory, do NOT pan
   if (pendingMemory || isBusy) return;
-
-  // If clicking a photo, don't start panning here
   if (ev.target && ev.target.closest && ev.target.closest(".photo")) return;
 
   isPanning = true;
@@ -131,7 +119,6 @@ function listViaIframe() {
   gasFrame.src = `${GAS_URL}?action=list&pm=1&_=${Date.now()}`;
 }
 
-// receive messages from GAS (list / upload / update / delete)
 window.addEventListener("message", (ev) => {
   const data = ev.data;
   if (!data || typeof data !== "object") return;
@@ -163,11 +150,10 @@ function renderFromList(data) {
 
   items.sort((a, b) => (a.sortTs || 0) - (b.sortTs || 0));
 
-  // ✅ IMPORTANT: set BASE_TS ONCE only (first load), never overwrite later
-  if (!HAS_LOADED) {
-    const validTs = items.map(it => it.sortTs).filter(ts => ts && ts > 0);
-    if (validTs.length) BASE_TS = Math.min(...validTs);
-    HAS_LOADED = true;
+  // IMPORTANT: set BASE_TS ONCE only (never overwrite later)
+  if (!BASE_TS) {
+    const validTs = items.map(it => it.sortTs).filter(ts => ts && ts > 0 && Number.isFinite(ts));
+    BASE_TS = validTs.length ? Math.min(...validTs) : Date.now();
   }
 
   for (const it of items) {
@@ -179,7 +165,7 @@ function renderFromList(data) {
   const maxX = items.reduce((m, it) => Math.max(m, it.x || 0), 0);
   ensureWallWidthForX(maxX);
 
-  // check if we can confirm the last upload exists in list
+  // confirm last upload exists in list => then remove preview + unlock
   if (awaitingSync) {
     const found = items.some((it) =>
       String(it.fileName || "") === awaitingSync.fileName &&
@@ -199,7 +185,7 @@ function renderFromList(data) {
   wall.innerHTML = "";
   for (const it of items) wall.appendChild(makePhoto(it));
 
-  // keep preview visible on top while awaiting sync
+  // keep preview on top while awaiting sync
   if (awaitingSync && awaitingSync.previewEl && !awaitingSync.previewEl.isConnected) {
     wall.appendChild(awaitingSync.previewEl);
   }
@@ -223,8 +209,6 @@ function makePhoto(it) {
   img.draggable = false;
   img.loading = "lazy";
   img.decoding = "async";
-
-  // Drive uc?export=view can fail; fallback to thumbnail
   img.onerror = () => {
     const fid = encodeURIComponent(it.fileId || "");
     if (fid) img.src = `https://drive.google.com/thumbnail?id=${fid}&sz=w1000`;
@@ -245,7 +229,7 @@ function makePhoto(it) {
   return el;
 }
 
-// ---- POST upload ----
+// ---- Upload ----
 async function postUpload(fields) {
   const p = new URLSearchParams();
   p.set("action", "upload");
@@ -276,7 +260,7 @@ function startSyncPolling() {
     awaitingSync.attempts += 1;
     listViaIframe();
 
-    // after ~30 seconds give up polling, but KEEP preview (don’t remove it)
+    // after ~30 seconds give up polling; KEEP preview (don’t remove it)
     if (awaitingSync.attempts >= 30) {
       toast("Saved. If it still doesn’t appear, refresh once.", 2400);
       isBusy = false;
@@ -291,13 +275,7 @@ function startSyncPolling() {
 
 // ---- Modal flow ----
 makeMemoryBtn.addEventListener("click", () => {
-  if (!HAS_LOADED) {
-    toast("Loading wall… try again in a sec", 1600);
-    listViaIframe();
-    return;
-  }
   if (isBusy) return toast("Wait… saving the last one ❤️");
-
   modalOverlay.style.display = "flex";
   memHint.textContent = "Pick a photo + date, then click “Place on wall”.";
   pendingMemory = null;
@@ -338,7 +316,6 @@ wall.addEventListener("pointerdown", async (ev) => {
   if (!pendingMemory) return;
   if (isBusy) return;
 
-  // lock immediately so multiple taps don't create multiple copies
   isBusy = true;
 
   ev.preventDefault();
@@ -358,7 +335,6 @@ wall.addEventListener("pointerdown", async (ev) => {
   scrollToWallX(x, tapX);
   ensureWallWidthForX(x);
 
-  // preview stays until list confirms the uploaded row exists
   const preview = document.createElement("div");
   preview.className = "photo";
   preview.style.left = x + "px";
