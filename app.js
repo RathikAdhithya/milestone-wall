@@ -109,7 +109,8 @@ function isoFromTs(ts) {
 function computeXFromDate(dateTs) {
   const base = BASE_TS || (dateTs || Date.now());
   const days = Math.floor((dateTs - base) / 86400000);
-  return Math.max(20, PADDING_X + days * PX_PER_DAY);
+  // IMPORTANT: no "20px clamp" — keep earliest column at PADDING_X
+  return PADDING_X + days * PX_PER_DAY;
 }
 
 function scrollToWallX(x, tapX = null) {
@@ -120,11 +121,42 @@ function scrollToWallX(x, tapX = null) {
 
 // helpers
 function dayIndexFromX(x) {
-  return Math.round((x - PADDING_X) / PX_PER_DAY);
+  // IMPORTANT: never allow negative dayIdx from dragging
+  return Math.max(0, Math.round((x - PADDING_X) / PX_PER_DAY));
 }
+
 function snapXToDayIndex(dayIdx) {
-  return Math.max(20, PADDING_X + dayIdx * PX_PER_DAY);
+  // IMPORTANT: never allow negative columns to collapse at the same x
+  return PADDING_X + Math.max(0, dayIdx) * PX_PER_DAY;
 }
+
+function rebaseTo_(newBaseTs) {
+  if (!Number.isFinite(newBaseTs) || newBaseTs <= 0) return;
+  if (BASE_TS == null) { BASE_TS = newBaseTs; return; }
+  if (newBaseTs >= BASE_TS) return;
+
+  const oldBase = BASE_TS;
+  BASE_TS = newBaseTs;
+
+  // keep your view roughly stable (shift scroll by number of new columns added)
+  const shiftDays = Math.ceil((oldBase - newBaseTs) / 86400000);
+  const deltaX = shiftDays * PX_PER_DAY;
+  viewport.scrollLeft += deltaX;
+
+  // recompute x for every item and update DOM in place (no flicker)
+  let maxX = 0;
+  for (const it of items) {
+    it.x = computeXFromDate(it.sortTs || BASE_TS);
+    maxX = Math.max(maxX, it.x || 0);
+
+    const el = findElById_(it.id);
+    if (el && !(drag && drag.active && drag.id === it.id)) {
+      setCardTransform_(el, it.x, it.y || 180, it.rot || 0, it.scale || 1);
+    }
+  }
+  ensureWallWidthForX(maxX);
+}
+
 function dateFromDayIndex(dayIdx) {
   const ts = (BASE_TS || Date.now()) + dayIdx * 86400000;
   const d = new Date(ts);
@@ -280,6 +312,7 @@ detSave.addEventListener("click", async () => {
   }
 
   const newTs = toTs(newDateStr);
+  if (BASE_TS != null && newTs < BASE_TS) rebaseTo_(newTs);
   const newX = computeXFromDate(newTs);
   const newY = snapY(Number(it.y || 180));
 
@@ -566,16 +599,31 @@ function normalizeItem(it) {
 
   const rot = Number(it.rot || 0);
   const scale = Number(it.scale || 1);
-  const imgUrl = String(it.imgUrl || it.img_url || (fileId ? `https://drive.google.com/uc?export=view&id=${encodeURIComponent(fileId)}` : ""));
 
-  return { id, fileId, fileName, tag, createdAt, takenDate, sortTs, x, y, rot, scale, imgUrl };
+  // IMPORTANT: keep clientId so preview adoption + dedupe works
+  const clientId = String(it.clientId || it.client_id || "");
+
+  const imgUrl = String(
+    it.imgUrl ||
+    it.img_url ||
+    (fileId ? `https://drive.google.com/uc?export=view&id=${encodeURIComponent(fileId)}` : "")
+  );
+
+  return { id, fileId, fileName, tag, createdAt, takenDate, sortTs, x, y, rot, scale, clientId, imgUrl };
 }
 
 function renderFromList(rawItems) {
   const next = (rawItems || []).map(normalizeItem).filter(it => it.id && it.fileId);
 
   const valid = next.map(i => i.sortTs).filter(ts => ts && ts > 0);
-  BASE_TS = valid.length ? Math.min(...valid) : (BASE_TS || Date.now());
+  const minTs = valid.length ? Math.min(...valid) : null;
+
+  // IMPORTANT: if a new earliest item exists, rebase smoothly (prevents left-shift duplication)
+  if (minTs != null && (BASE_TS == null || minTs < BASE_TS)) {
+    rebaseTo_(minTs);
+  } else {
+    BASE_TS = valid.length ? Math.min(...valid) : (BASE_TS || Date.now());
+  }
 
   for (const it of next) {
     if (!it.takenDate && it.sortTs) it.takenDate = new Date(it.sortTs).toISOString().slice(0,10);
@@ -605,11 +653,22 @@ function renderFromList(rawItems) {
 
   // upsert (no wall.innerHTML reset)
   for (const it of next) {
+    // ✅ HARD DEDUPE: if we have a pending preview for this clientId, remove it
+    // unless we adopt it in the block below.
+    const cid = String(it.clientId || "");
+    if (cid) {
+      const pending = pendingPreviews.get(cid);
+      // if there is a stray pending preview, we'll either adopt it (below) or remove it
+      // (this prevents "double card" during rebases)
+      if (pending && pending.isConnected && pending.classList.contains("pending")) {
+        // keep it for possible adopt; do nothing here
+      }
+    }
+
     let el = existingEls.get(it.id);
 
     // If it doesn't exist yet, try to adopt a pending preview by clientId
     if (!el) {
-      const cid = String(it.clientId || it.client_id || "");
       const pending = cid ? pendingPreviews.get(cid) : null;
 
       if (pending && pending.isConnected && pending.classList.contains("pending")) {
@@ -648,6 +707,16 @@ function renderFromList(rawItems) {
         continue; // done
       }
 
+      // ✅ If we didn't adopt, but a pending preview exists for the same clientId, remove it.
+      // This kills "duplicate" cases when the pending preview and real item both appear.
+      if (cid) {
+        const stray = pendingPreviews.get(cid);
+        if (stray && stray.isConnected) {
+          try { stray.remove(); } catch {}
+          pendingPreviews.delete(cid);
+        }
+      }
+
       // If no pending preview matches, create normally
       el = makePhoto(it);
       wall.appendChild(el);
@@ -667,6 +736,15 @@ function renderFromList(rawItems) {
 
     const img = el.querySelector("img");
     if (img && it.imgUrl && img.src !== it.imgUrl) img.src = it.imgUrl;
+
+    // ✅ Also kill any pending preview for this clientId if real item already exists
+    if (cid) {
+      const stray = pendingPreviews.get(cid);
+      if (stray && stray.isConnected) {
+        try { stray.remove(); } catch {}
+        pendingPreviews.delete(cid);
+      }
+    }
   }
 
   items = next;
@@ -833,6 +911,8 @@ wall.addEventListener("pointerdown", async (ev) => {
   const tapY = ev.clientY - vrect.top;
 
   const dateTs = toTs(mem.dateStr) || Date.now();
+  if (BASE_TS != null && dateTs < BASE_TS) rebaseTo_(dateTs);
+
   const x = computeXFromDate(dateTs);
   const y = Math.max(10, snapY(Math.round(tapY - 120)));
 
