@@ -118,3 +118,5 @@ body { margin: 0; background: #0b0b10; color: #fff; overflow: hidden; }
 
 #viewport { cursor: grab; }
 #viewport.grabbing { cursor: grabbing; }
+
+.photo.dragging { cursor: grabbing; }

@@ -17,6 +17,9 @@ const memCancel = document.getElementById("memCancel");
 const memPlace = document.getElementById("memPlace");
 const toastEl = document.getElementById("toast");
 
+const SNAP_Y = 20;            // y snap grid (px)
+const X_SNAP_THRESHOLD = 30;
+
 let items = [];
 let pendingMemory = null;
 
@@ -83,12 +86,136 @@ function scrollToWallX(x, tapX = null) {
   viewport.scrollTo({ left: target, behavior: "smooth" });
 }
 
+// helpers
+
+function dayIndexFromX(x) {
+  return Math.round((x - PADDING_X) / PX_PER_DAY);
+}
+
+function snapXToDayIndex(dayIdx) {
+  return Math.max(20, PADDING_X + dayIdx * PX_PER_DAY);
+}
+
+function dateFromDayIndex(dayIdx) {
+  const ts = (BASE_TS || Date.now()) + dayIdx * 86400000;
+  const d = new Date(ts);
+  const iso = d.toISOString().slice(0, 10);
+  return { ts, iso };
+}
+
+function snapY(y) {
+  const vh = viewport.clientHeight || window.innerHeight || 800;
+  const maxY = Math.max(10, vh - 280);
+  const sy = Math.round(y / SNAP_Y) * SNAP_Y;
+  return Math.max(10, Math.min(maxY, sy));
+}
+
 // -----------------------
 // DRAG TO PAN
 // -----------------------
 let isPanning = false;
 let panStartX = 0;
 let panStartScrollLeft = 0;
+
+let drag = null;
+
+wall.addEventListener("pointerdown", (ev) => {
+  if (pendingMemory || isBusy) return;
+
+  const card = ev.target && ev.target.closest ? ev.target.closest(".photo") : null;
+  if (!card) return;
+
+  const id = String(card.dataset.id || "");
+  const it = items.find(x => x.id === id);
+  if (!it) return;
+
+  drag = {
+    id,
+    it,
+    el: card,
+    pointerId: ev.pointerId,
+    startClientX: ev.clientX,
+    startClientY: ev.clientY,
+    startX: Number(it.x || 0),
+    startY: Number(it.y || 0),
+    startDayIdx: dayIndexFromX(Number(it.x || 0)),
+    curDayIdx: dayIndexFromX(Number(it.x || 0)),
+    curX: Number(it.x || 0),
+    curY: Number(it.y || 0),
+  };
+
+  card.classList.add("dragging");
+  card.style.zIndex = "999999";
+
+  try { card.setPointerCapture(ev.pointerId); } catch {}
+  ev.preventDefault();
+  ev.stopPropagation();
+}, { passive: false });
+
+wall.addEventListener("pointermove", (ev) => {
+  if (!drag || ev.pointerId !== drag.pointerId) return;
+
+  const dx = ev.clientX - drag.startClientX;
+  const dy = ev.clientY - drag.startClientY;
+
+  let dayIdx = drag.startDayIdx;
+  if (Math.abs(dx) > X_SNAP_THRESHOLD) {
+    dayIdx = dayIndexFromX(drag.startX + dx);
+  }
+
+  const sx = snapXToDayIndex(dayIdx);
+  const sy = snapY(drag.startY + dy);
+
+  drag.curDayIdx = dayIdx;
+  drag.curX = sx;
+  drag.curY = sy;
+
+  drag.el.style.left = sx + "px";
+  drag.el.style.top  = sy + "px";
+
+  const { iso } = dateFromDayIndex(dayIdx);
+  const dateEl = drag.el.querySelector(".dateLabel");
+  if (dateEl) dateEl.textContent = formatDateLabel(iso);
+}, { passive: true });
+
+async function endDrag(ev) {
+  if (!drag) return;
+
+  const d = drag;
+  drag = null;
+
+  try { d.el.releasePointerCapture(ev.pointerId); } catch {}
+
+  d.el.classList.remove("dragging");
+
+  const { ts, iso } = dateFromDayIndex(d.curDayIdx);
+
+  // update local model
+  d.it.x = d.curX;
+  d.it.y = d.curY;
+  d.it.sortTs = ts;
+  d.it.takenDate = iso;
+  d.el.style.zIndex = String(100000 + Math.floor(ts / 86400000));
+
+  // persist to sheet
+  try {
+    await postUpdate({
+      id: d.id,
+      x: d.curX,
+      y: d.curY,
+      taken_date: iso,
+      takenDate: iso,
+      sort_ts: ts,
+      sortTs: ts
+    });
+    toast("Updated ❤️");
+  } catch {
+    toast("Moved (refresh if needed)", 2000);
+  }
+}
+
+wall.addEventListener("pointerup", endDrag, { passive: true });
+wall.addEventListener("pointercancel", endDrag, { passive: true });
 
 viewport.addEventListener("pointerdown", (ev) => {
   if (pendingMemory || isBusy) return;
@@ -268,6 +395,17 @@ function makePhoto(it) {
 async function postUpload(fields) {
   const p = new URLSearchParams();
   p.set("action", "upload");
+  p.set("key", UPLOAD_KEY);
+  for (const [k, v] of Object.entries(fields || {})) {
+    if (v == null) continue;
+    p.set(k, String(v));
+  }
+  await fetch(GAS_URL, { method: "POST", mode: "no-cors", body: p });
+}
+
+async function postUpdate(fields) {
+  const p = new URLSearchParams();
+  p.set("action", "update");
   p.set("key", UPLOAD_KEY);
   for (const [k, v] of Object.entries(fields || {})) {
     if (v == null) continue;
