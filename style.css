@@ -29,21 +29,47 @@ body { margin: 0; background: #0b0b10; color: #fff; overflow: hidden; }
 /* PHOTO CARDS */
 .photo{
   position: absolute;
+  left: 0;
+  top: 0;
   width: 240px;
   user-select: none;
   touch-action: none;
   cursor: grab;
   transform-origin: center center;
+
+  /* smooth + GPU */
+  will-change: transform;
+  transition: transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
-.photo.dragging { cursor: grabbing; }
+
+.photo.dragging {
+  cursor: grabbing;
+  transition: none;            /* critical: no lag while dragging */
+}
 
 .frame{
   background: rgba(255,255,255,0.92);
   border-radius: 14px;
   padding: 10px 10px 14px 10px;
   box-shadow: 0 16px 38px rgba(0,0,0,0.40);
+
+  /* helps on some GPUs */
+  transform: translateZ(0);
 }
-.frame img{ width:100%; display:block; border-radius: 10px; }
+
+.frame img{
+  width:100%;
+  display:block;
+  border-radius: 10px;
+  -webkit-user-drag: none; /* Safari/Chrome */
+}
+
+/* optional: preview card styling */
+.photo.preview{
+  opacity: 0.98;
+  pointer-events: none;
+}
+
 .tag{
   margin-top: 8px;
   color: #111;

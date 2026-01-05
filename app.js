@@ -1,4 +1,4 @@
-const APP_VER = "2026-01-06_free_pan_drag_snap_details_v1";
+const APP_VER = "2026-01-06_free_pan_drag_snap_details_v2_smooth";
 console.log("Milestone Wall loaded:", APP_VER);
 
 const GAS_URL = "https://script.google.com/macros/s/AKfycbwAMAZkN1d4-xBG6bID8kyWCeNKSfKX29STFo_wipVxQFojmBP1jOvnWXKRrx1tvS6D7g/exec";
@@ -137,6 +137,14 @@ function snapY(y) {
 
 function findElById_(id) {
   return wall.querySelector(`.photo[data-id="${CSS.escape(String(id))}"]`);
+}
+
+/** POSITIONING: use GPU transforms instead of left/top */
+function setCardTransform_(el, x, y, rot = 0, scale = 1) {
+  el.style.transform = `translate3d(${Math.round(x)}px, ${Math.round(y)}px, 0) rotate(${rot}deg) scale(${scale})`;
+}
+function setCardZ_(el, sortTs) {
+  el.style.zIndex = String(100000 + Math.floor((sortTs || 0) / 86400000));
 }
 
 // -----------------------
@@ -280,9 +288,8 @@ detSave.addEventListener("click", async () => {
   it.y = newY;
 
   if (el) {
-    el.style.left = newX + "px";
-    el.style.top  = newY + "px";
-    el.style.zIndex = String(100000 + Math.floor(newTs / 86400000));
+    setCardTransform_(el, newX, newY, it.rot || 0, it.scale || 1);
+    setCardZ_(el, newTs);
 
     const tagEl = el.querySelector(".tag");
     if (tagEl) tagEl.textContent = newTag;
@@ -313,7 +320,7 @@ detSave.addEventListener("click", async () => {
 
   isBusy = false;
   closeDetails_();
-  setTimeout(() => listViaJsonp(), 350);
+  // no forced refresh; no flicker
 });
 
 detDelete.addEventListener("click", async () => {
@@ -336,14 +343,42 @@ detDelete.addEventListener("click", async () => {
   toast("Deleted 🗑️");
   isBusy = false;
   closeDetails_();
-  setTimeout(() => listViaJsonp(), 400);
+  // optional: refresh list; but our renderer is diff-based, so no blink
+  setTimeout(() => listViaJsonp(), 350);
 });
+
+// rAF throttle for drag movement
+function scheduleDragPaint_() {
+  if (!drag || drag.__raf) return;
+  drag.__raf = requestAnimationFrame(() => {
+    if (!drag) return;
+
+    const sx = drag.__pendingX;
+    const sy = drag.__pendingY;
+    const dayIdx = drag.__pendingDayIdx;
+
+    drag.curDayIdx = dayIdx;
+    drag.curX = sx;
+    drag.curY = sy;
+
+    setCardTransform_(drag.el, sx, sy, drag.it.rot || 0, drag.it.scale || 1);
+
+    const { iso } = dateFromDayIndex(dayIdx);
+    const dateEl = drag.el.querySelector(".dateLabel");
+    if (dateEl) dateEl.textContent = formatDateLabel(iso);
+
+    ensureWallWidthForX(sx);
+    ensureWallHeightForY(sy);
+
+    drag.__raf = 0;
+  });
+}
 
 wall.addEventListener("pointerdown", (ev) => {
   if (detailsOpen) return;
   if (pendingMemory || isBusy) return;
 
-  const card = ev.target && ev.target.closest ? ev.target.closest(".photo") : null;
+  const card = ev.target && ev.target.closest ? ev.target.closest(".photo[data-id]") : null;
   if (!card) return;
 
   const id = String(card.dataset.id || "");
@@ -363,7 +398,12 @@ wall.addEventListener("pointerdown", (ev) => {
     curDayIdx: dayIndexFromX(Number(it.x || 0)),
     curX: Number(it.x || 0),
     curY: Number(it.y || 0),
-    active: false,        // becomes true after movement threshold
+    active: false,
+
+    __raf: 0,
+    __pendingX: Number(it.x || 0),
+    __pendingY: Number(it.y || 0),
+    __pendingDayIdx: dayIndexFromX(Number(it.x || 0)),
   };
 
   try { card.setPointerCapture(ev.pointerId); } catch {}
@@ -378,7 +418,7 @@ wall.addEventListener("pointermove", (ev) => {
   const dy = ev.clientY - drag.startClientY;
 
   if (!drag.active) {
-    if (Math.hypot(dx, dy) < TAP_SLOP) return; // still a tap
+    if (Math.hypot(dx, dy) < TAP_SLOP) return;
     drag.active = true;
     drag.el.classList.add("dragging");
     drag.el.style.zIndex = "999999";
@@ -392,19 +432,11 @@ wall.addEventListener("pointermove", (ev) => {
   const sx = snapXToDayIndex(dayIdx);
   const sy = snapY(drag.startY + dy);
 
-  drag.curDayIdx = dayIdx;
-  drag.curX = sx;
-  drag.curY = sy;
+  drag.__pendingDayIdx = dayIdx;
+  drag.__pendingX = sx;
+  drag.__pendingY = sy;
 
-  drag.el.style.left = sx + "px";
-  drag.el.style.top  = sy + "px";
-
-  const { iso } = dateFromDayIndex(dayIdx);
-  const dateEl = drag.el.querySelector(".dateLabel");
-  if (dateEl) dateEl.textContent = formatDateLabel(iso);
-
-  ensureWallWidthForX(sx);
-  ensureWallHeightForY(sy);
+  scheduleDragPaint_();
 
   ev.preventDefault();
 }, { passive: false });
@@ -416,6 +448,7 @@ async function finishDrag_(ev, canceled = false) {
   drag = null;
 
   try { d.el.releasePointerCapture(ev.pointerId); } catch {}
+  if (d.__raf) { try { cancelAnimationFrame(d.__raf); } catch {} }
 
   // TAP -> open details
   if (!d.active) {
@@ -431,7 +464,11 @@ async function finishDrag_(ev, canceled = false) {
   d.it.y = d.curY;
   d.it.sortTs = ts;
   d.it.takenDate = iso;
-  d.el.style.zIndex = String(100000 + Math.floor(ts / 86400000));
+
+  setCardZ_(d.el, ts);
+
+  // keep final snapped transform (ensures we animate into place if last paint lagged)
+  setCardTransform_(d.el, d.curX, d.curY, d.it.rot || 0, d.it.scale || 1);
 
   try {
     await postUpdate({
@@ -448,7 +485,9 @@ async function finishDrag_(ev, canceled = false) {
     toast("Moved (refresh if needed)", 2000);
   }
 
-  if (!canceled) setTimeout(() => listViaJsonp(), 250);
+  // IMPORTANT: no auto list refresh here → no flicker
+  // If you still want occasional sync, do it on a timer elsewhere.
+  if (canceled) setTimeout(() => listViaJsonp(), 400);
 }
 wall.addEventListener("pointerup", (ev) => finishDrag_(ev, false), { passive: false });
 wall.addEventListener("pointercancel", (ev) => finishDrag_(ev, true), { passive: false });
@@ -503,7 +542,7 @@ function listViaJsonp(retry = 0) {
 }
 
 // -----------------------
-// RENDER
+// RENDER (DIFF UPDATE, NO BLINK)
 // -----------------------
 function normalizeItem(it) {
   const id = String(it.id || "");
@@ -531,30 +570,67 @@ function normalizeItem(it) {
 }
 
 function renderFromList(rawItems) {
-  items = (rawItems || []).map(normalizeItem).filter(it => it.id && it.fileId);
+  const next = (rawItems || []).map(normalizeItem).filter(it => it.id && it.fileId);
 
-  const valid = items.map(i => i.sortTs).filter(ts => ts && ts > 0);
-  BASE_TS = valid.length ? Math.min(...valid) : Date.now();
+  const valid = next.map(i => i.sortTs).filter(ts => ts && ts > 0);
+  BASE_TS = valid.length ? Math.min(...valid) : (BASE_TS || Date.now());
 
-  for (const it of items) {
+  for (const it of next) {
     if (!it.takenDate && it.sortTs) it.takenDate = new Date(it.sortTs).toISOString().slice(0,10);
     it.x = computeXFromDate(it.sortTs || BASE_TS);
     if (!Number.isFinite(it.y) || it.y <= 0) it.y = 180;
   }
 
-  items.sort((a,b)=> (a.sortTs||0)-(b.sortTs||0));
+  next.sort((a,b)=> (a.sortTs||0)-(b.sortTs||0));
 
-  const maxX = items.reduce((m, it) => Math.max(m, it.x || 0), 0);
-  const maxY = items.reduce((m, it) => Math.max(m, it.y || 0), 0);
+  const maxX = next.reduce((m, it) => Math.max(m, it.x || 0), 0);
+  const maxY = next.reduce((m, it) => Math.max(m, it.y || 0), 0);
   ensureWallWidthForX(maxX);
   ensureWallHeightForY(maxY);
 
-  wall.innerHTML = "";
-  for (const it of items) wall.appendChild(makePhoto(it));
+  const existingEls = new Map(
+    Array.from(wall.querySelectorAll(".photo[data-id]")).map(el => [String(el.dataset.id || ""), el])
+  );
+  const nextIds = new Set(next.map(it => it.id));
 
-  if (items.length) {
+  // remove missing
+  for (const [id, el] of existingEls) {
+    if (!nextIds.has(id)) {
+      try { el.remove(); } catch {}
+      existingEls.delete(id);
+    }
+  }
+
+  // upsert (no wall.innerHTML reset)
+  for (const it of next) {
+    let el = existingEls.get(it.id);
+    if (!el) {
+      el = makePhoto(it);
+      wall.appendChild(el);
+      existingEls.set(it.id, el);
+    } else {
+      // update DOM content in-place
+      setCardZ_(el, it.sortTs || 0);
+      setCardTransform_(el, it.x || 0, it.y || 0, it.rot || 0, it.scale || 1);
+
+      const dateEl = el.querySelector(".dateLabel");
+      if (dateEl) dateEl.textContent = formatDateLabel(it.takenDate);
+
+      const tagEl = el.querySelector(".tag");
+      if (tagEl) tagEl.textContent = it.tag || "";
+
+      const img = el.querySelector("img");
+      if (img && img.src !== it.imgUrl) img.src = it.imgUrl;
+    }
+  }
+
+  items = next;
+
+  // initial scroll only on first load
+  if (items.length && !renderFromList.__didInitialScroll) {
     const minX = items.reduce((m, it) => Math.min(m, it.x || 0), Infinity);
     viewport.scrollLeft = Math.max(0, minX - (viewport.clientWidth || 1) * 0.25);
+    renderFromList.__didInitialScroll = true;
   }
 }
 
@@ -563,7 +639,7 @@ function makePhoto(it) {
   el.className = "photo";
   el.dataset.id = it.id;
 
-  el.style.zIndex = String(100000 + Math.floor((it.sortTs || 0) / 86400000));
+  setCardZ_(el, it.sortTs || 0);
 
   const date = document.createElement("div");
   date.className = "dateLabel";
@@ -591,9 +667,7 @@ function makePhoto(it) {
   frame.appendChild(tag);
   el.appendChild(frame);
 
-  el.style.left = (it.x || 0) + "px";
-  el.style.top = (it.y || 0) + "px";
-  el.style.transform = `rotate(${it.rot || 0}deg) scale(${it.scale || 1})`;
+  setCardTransform_(el, it.x || 0, it.y || 0, it.rot || 0, it.scale || 1);
 
   return el;
 }
@@ -722,12 +796,9 @@ wall.addEventListener("pointerdown", async (ev) => {
   ensureWallHeightForY(y);
 
   const preview = document.createElement("div");
-  preview.className = "photo";
-  preview.style.left = x + "px";
-  preview.style.top = y + "px";
-  preview.style.opacity = "0.98";
-  preview.style.pointerEvents = "none";
+  preview.className = "photo preview";
   preview.style.zIndex = "999999";
+  setCardTransform_(preview, x, y, 0, 1);
   preview.innerHTML = `
     <div class="dateLabel">${formatDateLabel(mem.dateStr)}</div>
     <div class="frame">
@@ -766,9 +837,9 @@ wall.addEventListener("pointerdown", async (ev) => {
 
   setTimeout(() => {
     listViaJsonp();
-    setTimeout(() => { try { preview.remove(); } catch {} }, 1200);
+    setTimeout(() => { try { preview.remove(); } catch {} }, 900);
     isBusy = false;
-  }, 900);
+  }, 650);
 }, { passive: false });
 
 // initial load
