@@ -105,33 +105,35 @@ viewport.addEventListener("pointercancel", endPan, { passive: true });
 viewport.addEventListener("pointerleave", endPan, { passive: true });
 
 // -----------------------
-// LIST VIA IFRAME + postMessage (works on GitHub Pages)
+// LIST VIA JSONP (works on GitHub Pages)
 // -----------------------
-let gasFrame = null;
+function listViaJsonp() {
+  const cb = "__mw_list_cb_" + Date.now() + "_" + Math.random().toString(16).slice(2);
+  const s = document.createElement("script");
 
-function ensureGasFrame() {
-  if (gasFrame) return gasFrame;
-  gasFrame = document.createElement("iframe");
-  gasFrame.style.display = "none";
-  document.body.appendChild(gasFrame);
-  return gasFrame;
-}
+  window[cb] = (data) => {
+    try {
+      if (data && data.ok && Array.isArray(data.items)) {
+        wallLoaded = true;
+        renderFromList(data.items);
+      } else {
+        toast("Failed to load wall", 1800);
+      }
+    } finally {
+      try { delete window[cb]; } catch {}
+      try { s.remove(); } catch {}
+    }
+  };
 
-function listViaIframe() {
-  ensureGasFrame();
-  gasFrame.src = `${GAS_URL}?action=list&pm=1&_=${Date.now()}`;
-}
-
-window.addEventListener("message", (ev) => {
-  const data = ev.data;
-  if (!data || typeof data !== "object") return;
-  if (!data.ok || !Array.isArray(data.items)) {
+  s.src = `${GAS_URL}?action=list&callback=${encodeURIComponent(cb)}&_=${Date.now()}`;
+  s.onerror = () => {
+    try { delete window[cb]; } catch {}
     toast("Failed to load wall", 1800);
-    return;
-  }
-  wallLoaded = true;
-  renderFromList(data.items);
-});
+    try { s.remove(); } catch {}
+  };
+
+  document.body.appendChild(s);
+}
 
 // -----------------------
 // RENDER (accept snake_case + camelCase)
@@ -382,11 +384,12 @@ wall.addEventListener("pointerdown", async (ev) => {
   memFile.value = "";
 
   setTimeout(() => {
-    listViaIframe();
+    listViaJsonp();
     setTimeout(() => { try { preview.remove(); } catch {} }, 1200);
     isBusy = false;
   }, 900);
 }, { passive: false });
 
 // initial load
-listViaIframe();
+
+listViaJsonp();
