@@ -37,6 +37,8 @@ const SNAP_Y = 20;
 const X_SNAP_THRESHOLD = 30;
 const TAP_SLOP = 7; // px; tap vs drag threshold
 
+const pendingPreviews = new Map();
+
 let items = [];
 let pendingMemory = null;
 
@@ -604,24 +606,67 @@ function renderFromList(rawItems) {
   // upsert (no wall.innerHTML reset)
   for (const it of next) {
     let el = existingEls.get(it.id);
+
+    // If it doesn't exist yet, try to adopt a pending preview by clientId
     if (!el) {
+      const cid = String(it.clientId || it.client_id || "");
+      const pending = cid ? pendingPreviews.get(cid) : null;
+
+      if (pending && pending.isConnected && pending.classList.contains("pending")) {
+        el = pending;
+
+        // Convert preview -> real
+        el.classList.remove("preview", "pending");
+        el.dataset.id = it.id;
+        delete el.dataset.clientId;
+
+        pendingPreviews.delete(cid);
+        existingEls.set(it.id, el);
+
+        // Update tag/date
+        const dateEl = el.querySelector(".dateLabel");
+        if (dateEl) dateEl.textContent = formatDateLabel(it.takenDate);
+
+        const tagEl = el.querySelector(".tag");
+        if (tagEl) tagEl.textContent = it.tag || "";
+
+        // Swap image ONLY after Drive URL loads (prevents flash)
+        const img = el.querySelector("img");
+        if (img) {
+          const targetSrc = it.imgUrl;
+          if (targetSrc && img.src !== targetSrc) {
+            const pre = new Image();
+            pre.onload = () => { img.src = targetSrc; };
+            pre.src = targetSrc;
+          }
+        }
+
+        // Position/z-index
+        setCardZ_(el, it.sortTs || 0);
+        setCardTransform_(el, it.x || 0, it.y || 0, it.rot || 0, it.scale || 1);
+
+        continue; // done
+      }
+
+      // If no pending preview matches, create normally
       el = makePhoto(it);
       wall.appendChild(el);
       existingEls.set(it.id, el);
-    } else {
-      // update DOM content in-place
-      setCardZ_(el, it.sortTs || 0);
-      setCardTransform_(el, it.x || 0, it.y || 0, it.rot || 0, it.scale || 1);
-
-      const dateEl = el.querySelector(".dateLabel");
-      if (dateEl) dateEl.textContent = formatDateLabel(it.takenDate);
-
-      const tagEl = el.querySelector(".tag");
-      if (tagEl) tagEl.textContent = it.tag || "";
-
-      const img = el.querySelector("img");
-      if (img && img.src !== it.imgUrl) img.src = it.imgUrl;
+      continue;
     }
+
+    // Update existing element in place
+    setCardZ_(el, it.sortTs || 0);
+    setCardTransform_(el, it.x || 0, it.y || 0, it.rot || 0, it.scale || 1);
+
+    const dateEl = el.querySelector(".dateLabel");
+    if (dateEl) dateEl.textContent = formatDateLabel(it.takenDate);
+
+    const tagEl = el.querySelector(".tag");
+    if (tagEl) tagEl.textContent = it.tag || "";
+
+    const img = el.querySelector("img");
+    if (img && it.imgUrl && img.src !== it.imgUrl) img.src = it.imgUrl;
   }
 
   items = next;
@@ -796,9 +841,12 @@ wall.addEventListener("pointerdown", async (ev) => {
   ensureWallHeightForY(y);
 
   const preview = document.createElement("div");
-  preview.className = "photo preview";
+  preview.className = "photo preview pending";
+  preview.dataset.clientId = mem.clientId;
   preview.style.zIndex = "999999";
+
   setCardTransform_(preview, x, y, 0, 1);
+
   preview.innerHTML = `
     <div class="dateLabel">${formatDateLabel(mem.dateStr)}</div>
     <div class="frame">
@@ -806,7 +854,9 @@ wall.addEventListener("pointerdown", async (ev) => {
       <div class="tag">${mem.tag || ""}</div>
     </div>
   `;
+
   wall.appendChild(preview);
+  pendingPreviews.set(mem.clientId, preview);
 
   toast("Uploading…");
 
@@ -836,10 +886,19 @@ wall.addEventListener("pointerdown", async (ev) => {
   memFile.value = "";
 
   setTimeout(() => {
-    listViaJsonp();
-    setTimeout(() => { try { preview.remove(); } catch {} }, 900);
+    listViaJsonp();   // this will convert preview -> real seamlessly
     isBusy = false;
-  }, 650);
+  }, 250);
+
+  // Safety cleanup if it never shows up (upload failed / list blocked)
+  setTimeout(() => {
+    const p = pendingPreviews.get(mem.clientId);
+    if (p && p.isConnected && p.classList.contains("pending")) {
+      try { p.remove(); } catch {}
+      pendingPreviews.delete(mem.clientId);
+      toast("Upload didn’t sync (try refresh)", 2000);
+    }
+  }, 30000);
 }, { passive: false });
 
 // initial load
