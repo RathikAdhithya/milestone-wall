@@ -16,13 +16,87 @@ body { margin: 0; background: #0b0b10; color: #fff; overflow: hidden; }
 #viewport::-webkit-scrollbar{ display:none; }
 #viewport.grabbing { cursor: grabbing; }
 
+/* -----------------------
+   SPARKLE SKY OVERLAY (no JS)
+   Put this after #viewport{}
+------------------------ */
+
+#viewport{
+  /* keep your existing stuff, add this background */
+  background:
+    radial-gradient(1200px 800px at 20% 10%, rgba(255, 210, 240, 0.10), transparent 60%),
+    radial-gradient(900px 700px at 80% 30%, rgba(140, 200, 255, 0.08), transparent 60%),
+    radial-gradient(900px 900px at 50% 90%, rgba(180, 140, 255, 0.06), transparent 65%),
+    #0b0b10;
+}
+
+/* twinkling dot field */
+#viewport::before{
+  content:"";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  opacity: 0.75;
+
+  background-image:
+    radial-gradient(1px 1px at 20px 30px, rgba(255,255,255,0.85) 60%, transparent 61%),
+    radial-gradient(1px 1px at 120px 80px, rgba(255,255,255,0.55) 60%, transparent 61%),
+    radial-gradient(1px 1px at 200px 140px, rgba(255,255,255,0.35) 60%, transparent 61%),
+    radial-gradient(1px 1px at 40px 200px, rgba(255,255,255,0.45) 60%, transparent 61%),
+    radial-gradient(1px 1px at 220px 20px, rgba(255,255,255,0.25) 60%, transparent 61%);
+
+  background-size: 260px 260px;
+  animation: mwTwinkle 4.8s ease-in-out infinite alternate;
+  filter: blur(0.15px);
+  mix-blend-mode: screen;
+}
+
+/* bigger sparkle glints */
+#viewport::after{
+  content:"";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  opacity: 0.55;
+
+  background-image:
+    radial-gradient(2px 2px at 80px 60px, rgba(255,255,255,0.55) 60%, transparent 61%),
+    radial-gradient(2px 2px at 180px 160px, rgba(255,255,255,0.30) 60%, transparent 61%),
+    radial-gradient(2px 2px at 40px 180px, rgba(255,255,255,0.35) 60%, transparent 61%),
+    radial-gradient(2px 2px at 220px 40px, rgba(255,255,255,0.25) 60%, transparent 61%);
+
+  background-size: 320px 320px;
+  animation: mwTwinkle2 6.2s ease-in-out infinite alternate;
+  filter: blur(0.4px);
+  mix-blend-mode: screen;
+}
+
+@keyframes mwTwinkle{
+  0%   { opacity: 0.55; transform: translate3d(0,0,0); }
+  100% { opacity: 0.85; transform: translate3d(0,-6px,0); }
+}
+@keyframes mwTwinkle2{
+  0%   { opacity: 0.30; transform: translate3d(0,0,0); }
+  100% { opacity: 0.70; transform: translate3d(0,8px,0); }
+}
+
+/* Make sure wall/photos stay ABOVE the sparkle overlay */
+#wall{ z-index: 1; }
+.photo, #makeMemoryBtn, #toast, #modalOverlay, #detailOverlay { position: relative; z-index: 2; }
+
 #wall{
   position: relative;
   width: 20000px;
   height: 2400px;
+
+  /* transparent-ish so sparkles show */
+  background-color: rgba(0,0,0,0);
+
   background-image:
-    linear-gradient(rgba(255, 195, 229, 0.06) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255,255,255,0.06) 1px, transparent 1px);
+    linear-gradient(rgba(255, 195, 229, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,0.05) 1px, transparent 1px);
   background-size: 80px 80px;
 }
 
