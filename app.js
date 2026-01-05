@@ -68,6 +68,59 @@ function scrollToWallX(x, tapX = null) {
   viewport.scrollTo({ left: target, behavior: "smooth" });
 }
 
+// ---- Layout (anti-overlap lanes) ----
+const CARD_W = 240;
+const CARD_H = 320;          // approx total vertical footprint (image + label + padding)
+const GAP_X  = 18;
+const GAP_Y  = 26;
+
+// Choose one of these modes:
+const LAYOUT_MODE = "LANES"; // "LANES" recommended
+
+function rectsOverlap(ax, ay, aw, ah, bx, by, bw, bh) {
+  return !(ax + aw <= bx || bx + bw <= ax || ay + ah <= by || by + bh <= ay);
+}
+
+function clamp(v, lo, hi) {
+  return Math.max(lo, Math.min(hi, v));
+}
+
+// Find a y that doesn't overlap any existing item near this x.
+// We only check items whose x is close enough to potentially overlap.
+function pickFreeY(x, preferredY) {
+  const topPad = 40;
+  const bottomPad = 40;
+  const wallH = wall.clientHeight || window.innerHeight;
+  const yMin = topPad;
+  const yMax = Math.max(yMin, wallH - CARD_H - bottomPad);
+
+  const baseY = clamp(preferredY, yMin, yMax);
+
+  // Only consider items that could collide horizontally
+  const candidates = items.filter(it => Math.abs((it.x || 0) - x) < (CARD_W + GAP_X));
+
+  // Try lanes around the preferred Y: 0, +1, -1, +2, -2...
+  // Lane step = CARD_H + GAP_Y
+  const step = CARD_H + GAP_Y;
+
+  for (let k = 0; k < 60; k++) {
+    const dir = (k === 0) ? 0 : (k % 2 === 1 ? 1 : -1) * Math.ceil(k / 2);
+    const yTry = clamp(baseY + dir * step, yMin, yMax);
+
+    let ok = true;
+    for (const it of candidates) {
+      if (rectsOverlap(x, yTry, CARD_W, CARD_H, it.x || 0, it.y || 0, CARD_W, CARD_H)) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) return yTry;
+  }
+
+  // fallback: just clamp
+  return baseY;
+}
+
 // ---- Drag-to-pan ----
 let isPanning = false;
 let panStartX = 0;
@@ -226,6 +279,8 @@ function makePhoto(it) {
   el.style.top = (it.y || 0) + "px";
   el.style.transform = `rotate(${it.rot || 0}deg) scale(${it.scale || 1})`;
 
+  el.style.zIndex = String(100000 + Math.floor((it.sortTs || 0) / 86400000));
+
   return el;
 }
 
@@ -330,7 +385,8 @@ wall.addEventListener("pointerdown", async (ev) => {
 
   const dateTs = toTs(mem.dateStr) || Date.now();
   const x = computeXFromDate(dateTs);
-  const y = Math.max(10, Math.round(tapY - 120));
+  const preferredY = Math.max(10, Math.round(tapY - 120));
+  const y = (LAYOUT_MODE === "LANES") ? pickFreeY(x, preferredY) : preferredY;
 
   scrollToWallX(x, tapX);
   ensureWallWidthForX(x);
