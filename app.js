@@ -1,4 +1,4 @@
-const APP_VER = "2026-01-05_iframe_list_v4";
+const APP_VER = "2026-01-06_free_pan_drag_snap_v1";
 console.log("Milestone Wall loaded:", APP_VER);
 
 const GAS_URL = "https://script.google.com/macros/s/AKfycbwAMAZkN1d4-xBG6bID8kyWCeNKSfKX29STFo_wipVxQFojmBP1jOvnWXKRrx1tvS6D7g/exec";
@@ -17,7 +17,7 @@ const memCancel = document.getElementById("memCancel");
 const memPlace = document.getElementById("memPlace");
 const toastEl = document.getElementById("toast");
 
-const SNAP_Y = 20;            // y snap grid (px)
+const SNAP_Y = 20;
 const X_SNAP_THRESHOLD = 30;
 
 let items = [];
@@ -48,10 +48,16 @@ function ensureWallWidthForX(x) {
   wall.style.width = Math.max(cur, min, needed) + "px";
 }
 
+function ensureWallHeightForY(y) {
+  const min = 2400;
+  const needed = Math.ceil(y + 500);
+  const cur = wall.offsetHeight || min;
+  wall.style.height = Math.max(cur, min, needed) + "px";
+}
+
 function formatDateLabel(s) {
   if (!s) return "";
   try {
-    // accept "YYYY-MM-DD" or ms timestamp string/number
     if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
       const d = new Date(s + "T00:00:00");
       return d.toLocaleDateString(undefined, { year:"numeric", month:"short", day:"2-digit" });
@@ -87,36 +93,69 @@ function scrollToWallX(x, tapX = null) {
 }
 
 // helpers
-
 function dayIndexFromX(x) {
   return Math.round((x - PADDING_X) / PX_PER_DAY);
 }
-
 function snapXToDayIndex(dayIdx) {
   return Math.max(20, PADDING_X + dayIdx * PX_PER_DAY);
 }
-
 function dateFromDayIndex(dayIdx) {
   const ts = (BASE_TS || Date.now()) + dayIdx * 86400000;
   const d = new Date(ts);
   const iso = d.toISOString().slice(0, 10);
   return { ts, iso };
 }
-
 function snapY(y) {
-  const vh = viewport.clientHeight || window.innerHeight || 800;
-  const maxY = Math.max(10, vh - 280);
+  const maxY = Math.max(2000, (wall.offsetHeight || 2400) - 280);
   const sy = Math.round(y / SNAP_Y) * SNAP_Y;
   return Math.max(10, Math.min(maxY, sy));
 }
 
 // -----------------------
-// DRAG TO PAN
+// FREE PAN (X + Y) ON EMPTY SPACE
 // -----------------------
 let isPanning = false;
 let panStartX = 0;
+let panStartY = 0;
 let panStartScrollLeft = 0;
+let panStartScrollTop = 0;
 
+viewport.addEventListener("pointerdown", (ev) => {
+  if (pendingMemory || isBusy) return;
+  if (ev.target && ev.target.closest && ev.target.closest(".photo")) return;
+
+  isPanning = true;
+  panStartX = ev.clientX;
+  panStartY = ev.clientY;
+  panStartScrollLeft = viewport.scrollLeft;
+  panStartScrollTop = viewport.scrollTop;
+
+  try { viewport.setPointerCapture(ev.pointerId); } catch {}
+  viewport.classList.add("grabbing");
+
+  ev.preventDefault();
+}, { passive: false });
+
+viewport.addEventListener("pointermove", (ev) => {
+  if (!isPanning) return;
+  const dx = ev.clientX - panStartX;
+  const dy = ev.clientY - panStartY;
+  viewport.scrollLeft = panStartScrollLeft - dx;
+  viewport.scrollTop  = panStartScrollTop  - dy;
+}, { passive: true });
+
+function endPan(ev) {
+  if (!isPanning) return;
+  isPanning = false;
+  viewport.classList.remove("grabbing");
+  try { viewport.releasePointerCapture(ev.pointerId); } catch {}
+}
+viewport.addEventListener("pointerup", endPan, { passive: true });
+viewport.addEventListener("pointercancel", endPan, { passive: true });
+
+// -----------------------
+// DRAG PHOTO TO SNAP (Y + DATE COLUMN)
+// -----------------------
 let drag = null;
 
 wall.addEventListener("pointerdown", (ev) => {
@@ -176,6 +215,9 @@ wall.addEventListener("pointermove", (ev) => {
   const { iso } = dateFromDayIndex(dayIdx);
   const dateEl = drag.el.querySelector(".dateLabel");
   if (dateEl) dateEl.textContent = formatDateLabel(iso);
+
+  ensureWallWidthForX(sx);
+  ensureWallHeightForY(sy);
 }, { passive: true });
 
 async function endDrag(ev) {
@@ -185,19 +227,16 @@ async function endDrag(ev) {
   drag = null;
 
   try { d.el.releasePointerCapture(ev.pointerId); } catch {}
-
   d.el.classList.remove("dragging");
 
   const { ts, iso } = dateFromDayIndex(d.curDayIdx);
 
-  // update local model
   d.it.x = d.curX;
   d.it.y = d.curY;
   d.it.sortTs = ts;
   d.it.takenDate = iso;
   d.el.style.zIndex = String(100000 + Math.floor(ts / 86400000));
 
-  // persist to sheet
   try {
     await postUpdate({
       id: d.id,
@@ -213,36 +252,8 @@ async function endDrag(ev) {
     toast("Moved (refresh if needed)", 2000);
   }
 }
-
 wall.addEventListener("pointerup", endDrag, { passive: true });
 wall.addEventListener("pointercancel", endDrag, { passive: true });
-
-viewport.addEventListener("pointerdown", (ev) => {
-  if (pendingMemory || isBusy) return;
-  if (ev.target && ev.target.closest && ev.target.closest(".photo")) return;
-
-  isPanning = true;
-  panStartX = ev.clientX;
-  panStartScrollLeft = viewport.scrollLeft;
-  try { viewport.setPointerCapture(ev.pointerId); } catch {}
-  viewport.classList.add("grabbing");
-}, { passive: true });
-
-viewport.addEventListener("pointermove", (ev) => {
-  if (!isPanning) return;
-  const dx = ev.clientX - panStartX;
-  viewport.scrollLeft = panStartScrollLeft - dx;
-}, { passive: true });
-
-function endPan(ev) {
-  if (!isPanning) return;
-  isPanning = false;
-  viewport.classList.remove("grabbing");
-  try { viewport.releasePointerCapture(ev.pointerId); } catch {}
-}
-viewport.addEventListener("pointerup", endPan, { passive: true });
-viewport.addEventListener("pointercancel", endPan, { passive: true });
-viewport.addEventListener("pointerleave", endPan, { passive: true });
 
 // -----------------------
 // LIST VIA JSONP (works on GitHub Pages)
@@ -306,7 +317,6 @@ function normalizeItem(it) {
   const takenDate = String(it.takenDate || it.taken_date || "");
   let sortTs = Number(it.sortTs || it.sort_ts || 0) || 0;
 
-  // fallback: created_at
   if (!sortTs && createdAt) {
     const ts = Date.parse(createdAt);
     sortTs = Number.isFinite(ts) ? ts : 0;
@@ -325,7 +335,6 @@ function normalizeItem(it) {
 function renderFromList(rawItems) {
   items = (rawItems || []).map(normalizeItem).filter(it => it.id && it.fileId);
 
-  // set BASE_TS ONCE from earliest sortTs (or today if empty)
   const valid = items.map(i => i.sortTs).filter(ts => ts && ts > 0);
   BASE_TS = valid.length ? Math.min(...valid) : Date.now();
 
@@ -338,7 +347,9 @@ function renderFromList(rawItems) {
   items.sort((a,b)=> (a.sortTs||0)-(b.sortTs||0));
 
   const maxX = items.reduce((m, it) => Math.max(m, it.x || 0), 0);
+  const maxY = items.reduce((m, it) => Math.max(m, it.y || 0), 0);
   ensureWallWidthForX(maxX);
+  ensureWallHeightForY(maxY);
 
   wall.innerHTML = "";
   for (const it of items) wall.appendChild(makePhoto(it));
@@ -390,7 +401,7 @@ function makePhoto(it) {
 }
 
 // -----------------------
-// UPLOAD
+// UPLOAD / UPDATE
 // -----------------------
 async function postUpload(fields) {
   const p = new URLSearchParams();
@@ -500,8 +511,8 @@ wall.addEventListener("pointerdown", async (ev) => {
 
   scrollToWallX(x, tapX);
   ensureWallWidthForX(x);
+  ensureWallHeightForY(y);
 
-  // instant preview
   const preview = document.createElement("div");
   preview.className = "photo";
   preview.style.left = x + "px";
@@ -557,5 +568,4 @@ wall.addEventListener("pointerdown", async (ev) => {
 }, { passive: false });
 
 // initial load
-
 listViaJsonp();
