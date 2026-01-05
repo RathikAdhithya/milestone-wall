@@ -107,29 +107,47 @@ viewport.addEventListener("pointerleave", endPan, { passive: true });
 // -----------------------
 // LIST VIA JSONP (works on GitHub Pages)
 // -----------------------
-function listViaJsonp() {
+function listViaJsonp(retry = 0) {
   const cb = "__mw_list_cb_" + Date.now() + "_" + Math.random().toString(16).slice(2);
   const s = document.createElement("script");
 
+  let done = false;
+  function cleanup() {
+    try { delete window[cb]; } catch {}
+    try { s.remove(); } catch {}
+  }
+
+  const timer = setTimeout(() => {
+    if (done) return;
+    done = true;
+    cleanup();
+    toast("Wall load timed out. Check Apps Script access = Anyone + redeploy.", 2600);
+    if (retry < 2) setTimeout(() => listViaJsonp(retry + 1), 600);
+  }, 5000);
+
   window[cb] = (data) => {
-    try {
-      if (data && data.ok && Array.isArray(data.items)) {
-        wallLoaded = true;
-        renderFromList(data.items);
-      } else {
-        toast("Failed to load wall", 1800);
-      }
-    } finally {
-      try { delete window[cb]; } catch {}
-      try { s.remove(); } catch {}
+    if (done) return;
+    done = true;
+    clearTimeout(timer);
+    cleanup();
+
+    if (data && data.ok && Array.isArray(data.items)) {
+      wallLoaded = true;
+      renderFromList(data.items);
+    } else {
+      toast("Failed to load wall (bad response). Check Apps Script logs.", 2400);
+      console.log("list bad response:", data);
     }
   };
 
   s.src = `${GAS_URL}?action=list&callback=${encodeURIComponent(cb)}&_=${Date.now()}`;
   s.onerror = () => {
-    try { delete window[cb]; } catch {}
-    toast("Failed to load wall", 1800);
-    try { s.remove(); } catch {}
+    if (done) return;
+    done = true;
+    clearTimeout(timer);
+    cleanup();
+    toast("Failed to load wall (network).", 2000);
+    if (retry < 2) setTimeout(() => listViaJsonp(retry + 1), 600);
   };
 
   document.body.appendChild(s);
