@@ -1,4 +1,4 @@
-const APP_VER = "2026-01-05_layout_v1";
+const APP_VER = "2026-01-05_persist_fix_v3";
 console.log("Milestone Wall loaded:", APP_VER);
 
 const GAS_URL = "https://script.google.com/macros/s/AKfycbwAMAZkN1d4-xBG6bID8kyWCeNKSfKX29STFo_wipVxQFojmBP1jOvnWXKRrx1tvS6D7g/exec";
@@ -20,20 +20,10 @@ const toastEl = document.getElementById("toast");
 let items = [];
 let pendingMemory = null;
 
-let BASE_TS = null;          // only used when x is missing
-let isBusy = false;          // prevents double placement
-let awaitingSync = null;     // { clientId, previewEl, attempts, timerId }
+let BASE_TS = null;
+let isBusy = false;
+let wallLoaded = false;
 
-let hasAutoScrolled = false; // auto-scroll once after load
-
-// ---- Layout tuning ----
-// approximate card footprint (used for collision detection)
-const CARD_W = 260;
-const CARD_H = 340;
-const GAP_X  = 24;
-const GAP_Y  = 28;
-
-// ---- UI ----
 function toast(msg, ms = 1400) {
   if (!toastEl) return;
   toastEl.textContent = msg;
@@ -66,7 +56,7 @@ function toTs(dateStr) {
 
 function computeXFromDate(dateTs) {
   if (!BASE_TS) BASE_TS = dateTs || Date.now();
-  const pxPerDay = 70;      // slightly wider than before
+  const pxPerDay = 70;
   const paddingX = 240;
   const days = Math.round((dateTs - BASE_TS) / 86400000);
   return Math.max(20, paddingX + days * pxPerDay);
@@ -78,70 +68,9 @@ function scrollToWallX(x, tapX = null) {
   viewport.scrollTo({ left: target, behavior: "smooth" });
 }
 
-function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
-
-function rectsOverlap(ax, ay, aw, ah, bx, by, bw, bh) {
-  return !(ax + aw <= bx || bx + bw <= ax || ay + ah <= by || by + bh <= ay);
-}
-
-// Pick a y that doesn't collide with already-placed items near this x.
-function pickFreeY(x, preferredY, placed) {
-  const topPad = 30;
-  const bottomPad = 30;
-  const wallH = wall.clientHeight || window.innerHeight;
-
-  const yMin = topPad;
-  const yMax = Math.max(yMin, wallH - CARD_H - bottomPad);
-
-  const baseY = clamp(preferredY, yMin, yMax);
-
-  const candidates = placed.filter(it => Math.abs((it.x || 0) - x) < (CARD_W + GAP_X));
-
-  const step = CARD_H + GAP_Y;
-
-  for (let k = 0; k < 80; k++) {
-    const dir = (k === 0) ? 0 : (k % 2 === 1 ? 1 : -1) * Math.ceil(k / 2);
-    const yTry = clamp(baseY + dir * step, yMin, yMax);
-
-    let ok = true;
-    for (const it of candidates) {
-      if (rectsOverlap(x, yTry, CARD_W, CARD_H, it.x || 0, it.y || 0, CARD_W, CARD_H)) {
-        ok = false;
-        break;
-      }
-    }
-    if (ok) return yTry;
-  }
-
-  return baseY;
-}
-
-// Auto-layout ALL items to avoid overlaps, but keep x stable.
-// If y changes, we persist it back to the sheet.
-function autoLayoutAndCollectUpdates(list) {
-  const placed = [];
-  const updates = [];
-
-  // sort by x (timeline), then by date
-  const ordered = [...list].sort((a, b) => (a.x - b.x) || (a.sortTs - b.sortTs));
-
-  for (const it of ordered) {
-    const preferredY = Number.isFinite(it.y) ? it.y : 180;
-    const y2 = pickFreeY(it.x, preferredY, placed);
-
-    // If it moved enough, update
-    if (!Number.isFinite(it.y) || Math.abs(y2 - it.y) >= 2) {
-      it.y = y2;
-      if (it.id) updates.push({ id: it.id, y: y2 });
-    }
-
-    placed.push(it);
-  }
-
-  return { list: ordered, updates };
-}
-
-// ---- Drag-to-pan ----
+// -----------------------
+// DRAG TO PAN
+// -----------------------
 let isPanning = false;
 let panStartX = 0;
 let panStartScrollLeft = 0;
@@ -153,7 +82,6 @@ viewport.addEventListener("pointerdown", (ev) => {
   isPanning = true;
   panStartX = ev.clientX;
   panStartScrollLeft = viewport.scrollLeft;
-
   try { viewport.setPointerCapture(ev.pointerId); } catch {}
   viewport.classList.add("grabbing");
 }, { passive: true });
@@ -174,146 +102,109 @@ viewport.addEventListener("pointerup", endPan, { passive: true });
 viewport.addEventListener("pointercancel", endPan, { passive: true });
 viewport.addEventListener("pointerleave", endPan, { passive: true });
 
-// ---- GAS list via hidden iframe + postMessage ----
-let gasFrame = null;
+// -----------------------
+// LIST (JSONP) - RELIABLE ON GITHUB PAGES
+// -----------------------
+let __jsonpScript = null;
 
-function ensureGasFrame() {
-  if (gasFrame) return gasFrame;
-  gasFrame = document.createElement("iframe");
-  gasFrame.id = "gasFrame";
-  gasFrame.style.display = "none";
-  document.body.appendChild(gasFrame);
-  return gasFrame;
-}
-
-function listViaIframe() {
-  ensureGasFrame();
-  gasFrame.src = `${GAS_URL}?action=list&pm=1&_=${Date.now()}`;
-}
-
-window.addEventListener("message", (ev) => {
+window.__wallListCb = function (payload) {
   try {
-    const data = ev.data;
-    if (!data || typeof data !== "object") return;
-    if (data.ok && Array.isArray(data.items)) renderFromList(data.items);
-  } catch (err) {
-    console.error("message handler error:", err);
-  }
-});
-
-// ---- Persist y fixes back to sheet (no-cors fire-and-forget) ----
-async function postUpdate(id, fields) {
-  const p = new URLSearchParams();
-  p.set("action", "update");
-  p.set("key", UPLOAD_KEY);
-  p.set("id", id);
-  for (const [k, v] of Object.entries(fields || {})) {
-    if (v == null) continue;
-    p.set(k, String(v));
-  }
-  await fetch(GAS_URL, { method: "POST", mode: "no-cors", body: p });
-}
-
-let __updateQueue = [];
-let __updateTimer = null;
-
-function queueUpdates(updates) {
-  if (!updates || !updates.length) return;
-  for (const u of updates) __updateQueue.push(u);
-
-  if (__updateTimer) return;
-  __updateTimer = setTimeout(async () => {
-    const batch = __updateQueue.splice(0, 25); // small batch
-    __updateTimer = null;
-
-    try {
-      // send sequentially (simple + reliable)
-      for (const u of batch) {
-        await postUpdate(u.id, { y: u.y });
-      }
-    } catch (e) {
-      console.warn("update batch failed", e);
+    if (!payload || !payload.ok || !Array.isArray(payload.items)) {
+      console.warn("Bad list payload", payload);
+      toast("Failed to load wall", 1800);
+      return;
     }
+    wallLoaded = true;
+    renderFromList(payload.items);
+  } catch (e) {
+    console.error("List callback error", e);
+  }
+};
 
-    // if more remain, schedule another batch
-    if (__updateQueue.length) queueUpdates([]);
-  }, 400);
+function listViaJSONP() {
+  // remove old script tag
+  try { if (__jsonpScript && __jsonpScript.parentNode) __jsonpScript.parentNode.removeChild(__jsonpScript); } catch {}
+
+  const s = document.createElement("script");
+  s.async = true;
+  s.src = `${GAS_URL}?action=list&callback=__wallListCb&_=${Date.now()}`;
+  s.onerror = () => {
+    console.warn("JSONP load failed");
+    toast("Failed to load wall", 1800);
+  };
+  __jsonpScript = s;
+  document.head.appendChild(s);
 }
 
-function renderFromList(raw) {
-  items = (raw || []).map((it) => {
-    const takenDate = it.takenDate || it.taken_date || "";
-    const sortTs = Number(it.sortTs || it.sort_ts || (takenDate ? toTs(takenDate) : 0));
-    return {
-      ...it,
-      id: String(it.id || ""),
-      fileId: String(it.fileId || ""),
-      fileName: String(it.fileName || ""),
-      tag: String(it.tag || ""),
-      takenDate,
-      sortTs,
-      x: Number(it.x),
-      y: Number(it.y),
-      rot: Number(it.rot || 0),
-      scale: Number(it.scale || 1),
-      clientId: String(it.clientId || it.client_id || ""),
-      imgUrl: String(it.imgUrl || "")
-    };
-  });
+// -----------------------
+// RENDER
+// -----------------------
+function normalizeItem(it) {
+  // accept BOTH snake_case + camelCase
+  const id = String(it.id || "");
+  const fileId = String(it.fileId || it.file_id || "");
+  const fileName = String(it.fileName || it.file_name || "");
+  const tag = String(it.tag || "");
+  const createdAt = String(it.createdAt || it.created_at || "");
 
-  // establish BASE_TS once (only used if some rows are missing x)
+  const takenDate = String(it.takenDate || it.taken_date || "");
+  const sortTs = Number(it.sortTs || it.sort_ts || (takenDate ? toTs(takenDate) : 0)) || 0;
+
+  const x = Number(it.x);
+  const y = Number(it.y);
+
+  const rot = Number(it.rot || 0);
+  const scale = Number(it.scale || 1);
+
+  // accept imgUrl if present, otherwise compute
+  const imgUrl = String(it.imgUrl || it.img_url || (fileId ? `https://drive.google.com/uc?export=view&id=${encodeURIComponent(fileId)}` : ""));
+
+  return { id, fileId, fileName, tag, createdAt, takenDate, sortTs, x, y, rot, scale, imgUrl };
+}
+
+function renderFromList(rawItems) {
+  items = (rawItems || []).map(normalizeItem).filter(it => it.id && it.fileId);
+
+  // if sortTs missing everywhere, fallback to createdAt
+  for (const it of items) {
+    if (!it.sortTs) {
+      const ts = it.createdAt ? Date.parse(it.createdAt) : 0;
+      it.sortTs = Number.isFinite(ts) ? ts : 0;
+    }
+    if (!it.takenDate && it.sortTs) {
+      // best-effort derived date for label
+      const d = new Date(it.sortTs);
+      it.takenDate = d.toISOString().slice(0, 10);
+    }
+  }
+
+  // establish BASE_TS once
   if (!BASE_TS) {
-    const valid = items.map(i => i.sortTs).filter(ts => ts && ts > 0 && Number.isFinite(ts));
+    const valid = items.map(i => i.sortTs).filter(ts => ts && ts > 0);
     BASE_TS = valid.length ? Math.min(...valid) : Date.now();
   }
 
-  // If any row is missing x, compute it (otherwise keep stored x forever)
+  // compute x if missing
   for (const it of items) {
     if (!Number.isFinite(it.x) || it.x <= 0) {
-      const ts = it.sortTs || BASE_TS || Date.now();
-      it.x = computeXFromDate(ts);
+      it.x = computeXFromDate(it.sortTs || BASE_TS || Date.now());
     }
     if (!Number.isFinite(it.y) || it.y <= 0) it.y = 180;
   }
 
-  // Auto-layout to remove overlap (and persist y changes)
-  const { list: laidOut, updates } = autoLayoutAndCollectUpdates(items);
+  // sort by time (left to right)
+  items.sort((a, b) => (a.sortTs || 0) - (b.sortTs || 0));
 
-  // Apply back into items (we keep the laid-out order for rendering)
-  items = laidOut;
-
-  // Persist any y fixes so refresh stays perfect
-  queueUpdates(updates);
-
-  // Ensure wall width
   const maxX = items.reduce((m, it) => Math.max(m, it.x || 0), 0);
   ensureWallWidthForX(maxX);
-
-  // Confirm upload by clientId (remove preview only when real row exists)
-  if (awaitingSync) {
-    const found = items.some(it => it.clientId && it.clientId === awaitingSync.clientId);
-    if (found) {
-      try { awaitingSync.previewEl.remove(); } catch {}
-      clearTimeout(awaitingSync.timerId);
-      awaitingSync = null;
-      isBusy = false;
-    }
-  }
 
   wall.innerHTML = "";
   for (const it of items) wall.appendChild(makePhoto(it));
 
-  // Keep preview on top while awaiting sync
-  if (awaitingSync && awaitingSync.previewEl && !awaitingSync.previewEl.isConnected) {
-    wall.appendChild(awaitingSync.previewEl);
-  }
-
-  // Auto-scroll once so refresh NEVER looks "empty"
-  if (!hasAutoScrolled && items.length) {
-    hasAutoScrolled = true;
+  // auto-scroll to first item so refresh never looks "empty"
+  if (items.length) {
     const minX = items.reduce((m, it) => Math.min(m, it.x || 0), Infinity);
-    const target = Math.max(0, minX - (viewport.clientWidth || 1) * 0.25);
-    viewport.scrollLeft = target;
+    viewport.scrollLeft = Math.max(0, minX - (viewport.clientWidth || 1) * 0.25);
   }
 }
 
@@ -322,7 +213,6 @@ function makePhoto(it) {
   el.className = "photo";
   el.dataset.id = it.id;
 
-  // keep later dates on top
   el.style.zIndex = String(100000 + Math.floor((it.sortTs || 0) / 86400000));
 
   const date = document.createElement("div");
@@ -340,7 +230,7 @@ function makePhoto(it) {
   img.decoding = "async";
   img.onerror = () => {
     const fid = encodeURIComponent(it.fileId || "");
-    if (fid) img.src = `https://drive.google.com/thumbnail?id=${fid}&sz=w1000`;
+    if (fid) img.src = `https://drive.google.com/thumbnail?id=${fid}&sz=w1200`;
   };
 
   const tag = document.createElement("div");
@@ -358,11 +248,14 @@ function makePhoto(it) {
   return el;
 }
 
-// ---- Upload ----
+// -----------------------
+// UPLOAD
+// -----------------------
 async function postUpload(fields) {
   const p = new URLSearchParams();
   p.set("action", "upload");
   p.set("key", UPLOAD_KEY);
+
   for (const [k, v] of Object.entries(fields || {})) {
     if (v == null) continue;
     p.set(k, String(v));
@@ -384,30 +277,13 @@ function newClientId() {
   return "cid_" + Date.now() + "_" + Math.random().toString(16).slice(2);
 }
 
-function startSyncPolling() {
-  if (!awaitingSync) return;
-  clearTimeout(awaitingSync.timerId);
-
-  const tick = () => {
-    if (!awaitingSync) return;
-
-    awaitingSync.attempts += 1;
-    listViaIframe();
-
-    if (awaitingSync.attempts >= 50) {
-      toast("Saved. If it still doesn’t appear, refresh once.", 2400);
-      isBusy = false;
-      return;
-    }
-    awaitingSync.timerId = setTimeout(tick, 800);
-  };
-
-  awaitingSync.timerId = setTimeout(tick, 500);
-}
-
-// ---- Modal flow ----
+// -----------------------
+// MODAL FLOW
+// -----------------------
 makeMemoryBtn.addEventListener("click", () => {
+  if (!wallLoaded) return toast("Loading wall… try again in a sec", 1600);
   if (isBusy) return toast("Wait… saving ❤️");
+
   modalOverlay.style.display = "flex";
   memHint.textContent = "Pick a photo + date, then click “Place on wall”.";
   pendingMemory = null;
@@ -440,6 +316,7 @@ memPlace.addEventListener("click", async () => {
   pendingMemory = {
     clientId: newClientId(),
     fileName: f.name,
+    file_name: f.name,
     tag,
     dateStr,
     imageData
@@ -449,7 +326,9 @@ memPlace.addEventListener("click", async () => {
   toast("Tap anywhere on the wall to place it");
 });
 
-// ---- Place on wall ----
+// -----------------------
+// PLACE ON WALL
+// -----------------------
 wall.addEventListener("pointerdown", async (ev) => {
   if (!pendingMemory) return;
   if (isBusy) return;
@@ -466,18 +345,13 @@ wall.addEventListener("pointerdown", async (ev) => {
   const tapY = ev.clientY - vrect.top;
 
   const dateTs = toTs(mem.dateStr) || Date.now();
-
-  // x anchored to date
   const x = computeXFromDate(dateTs);
-
-  // y chosen by lane algorithm to avoid overlap
-  const preferredY = Math.max(10, Math.round(tapY - 120));
-  const placedNow = [...items]; // current items as collision set
-  const y = pickFreeY(x, preferredY, placedNow);
+  const y = Math.max(10, Math.round(tapY - 120));
 
   scrollToWallX(x, tapX);
   ensureWallWidthForX(x);
 
+  // instant preview
   const preview = document.createElement("div");
   preview.className = "photo";
   preview.style.left = x + "px";
@@ -494,38 +368,48 @@ wall.addEventListener("pointerdown", async (ev) => {
   `;
   wall.appendChild(preview);
 
-  awaitingSync = {
-    clientId: mem.clientId,
-    previewEl: preview,
-    attempts: 0,
-    timerId: null
-  };
-
   toast("Uploading…");
 
   try {
     await postUpload({
       client_id: mem.clientId,
+      clientId: mem.clientId,
+
       fileName: mem.fileName,
+      file_name: mem.fileName,
+
       tag: mem.tag,
       imageData: mem.imageData,
+
       x, y,
       rot: 0,
       scale: 1,
+
+      // SEND BOTH NAMING STYLES (THIS FIXES YOUR EMPTY COLUMNS)
       taken_date: mem.dateStr,
-      sort_ts: dateTs
+      takenDate: mem.dateStr,
+
+      sort_ts: dateTs,
+      sortTs: dateTs
     });
+
     toast("Saved ❤️");
   } catch {
-    toast("Saved. If it disappears, refresh.", 2200);
+    toast("Saved. If it vanishes, refresh.", 2200);
   }
 
   memTag.value = "";
   memDate.value = "";
   memFile.value = "";
 
-  startSyncPolling();
+  // refresh list after upload
+  setTimeout(() => {
+    listViaJSONP();
+    // remove preview after list reload
+    setTimeout(() => { try { preview.remove(); } catch {} }, 1500);
+    isBusy = false;
+  }, 900);
 }, { passive: false });
 
 // initial load
-listViaIframe();
+listViaJSONP();
