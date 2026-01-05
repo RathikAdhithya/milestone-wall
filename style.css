@@ -15,7 +15,7 @@ body { margin: 0; background: #0b0b10; color: #fff; overflow: hidden; }
 #wall{
   position: relative;
   width: 20000px;
-  height: 100vh;
+  height: 2400px;              /* was 100vh; make it bigger */
   background-image:
     linear-gradient(rgba(255,255,255,0.06) 1px, transparent 1px),
     linear-gradient(90deg, rgba(255,255,255,0.06) 1px, transparent 1px);
@@ -116,7 +116,15 @@ body { margin: 0; background: #0b0b10; color: #fff; overflow: hidden; }
 }
 #modal .primary{ background: rgba(120, 190, 255, 0.20); border-color: rgba(120, 190, 255, 0.45); }
 
-#viewport { cursor: grab; }
-#viewport.grabbing { cursor: grabbing; }
+#viewport{
+  position: fixed;
+  inset: 0;
+  overflow-x: scroll;
+  overflow-y: scroll;          /* was hidden */
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  touch-action: none;          /* important: lets our pointer-drag pan work on iPad */
+}
+#viewport::-webkit-scrollbar{ display:none; }
 
 .photo.dragging { cursor: grabbing; }
