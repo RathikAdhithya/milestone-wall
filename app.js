@@ -21,12 +21,15 @@ let pendingMemory = null;
 // stable base so X-from-date stays consistent during session
 let BASE_TS = null;
 
+// set true after first successful list load
+let HAS_LOADED = false;
+
 // prevents multiple placements during upload/sync
 let isBusy = false;
 
 // if we placed a preview, keep it until sheet confirms the new item exists
-let awaitingSync = null; 
-// shape: { fileName, tag, sortTs, previewEl, attempts, timerId }
+let awaitingSync = null;
+// shape: { fileName, tag, sortTs, y, previewEl, attempts, timerId }
 
 // ---- UI helpers ----
 function toast(msg, ms = 1400) {
@@ -39,7 +42,7 @@ function toast(msg, ms = 1400) {
 
 function ensureWallWidthForX(x) {
   const min = 20000;
-  const needed = Math.ceil(x + 700); // padding on right
+  const needed = Math.ceil(x + 700);
   const cur = wall.offsetWidth || min;
   const next = Math.max(cur, min, needed);
   wall.style.width = next + "px";
@@ -80,10 +83,10 @@ let panStartX = 0;
 let panStartScrollLeft = 0;
 
 viewport.addEventListener("pointerdown", (ev) => {
-  // If we're placing a memory, do NOT pan (tap places it)
+  // If we're placing a memory, do NOT pan
   if (pendingMemory || isBusy) return;
 
-  // If the user clicked a photo, don't start panning here
+  // If clicking a photo, don't start panning here
   if (ev.target && ev.target.closest && ev.target.closest(".photo")) return;
 
   isPanning = true;
@@ -160,12 +163,16 @@ function renderFromList(data) {
 
   items.sort((a, b) => (a.sortTs || 0) - (b.sortTs || 0));
 
-  const firstValid = items.find((it) => it.sortTs && it.sortTs > 0);
-  if (firstValid) BASE_TS = firstValid.sortTs;
+  // ✅ IMPORTANT: set BASE_TS ONCE only (first load), never overwrite later
+  if (!HAS_LOADED) {
+    const validTs = items.map(it => it.sortTs).filter(ts => ts && ts > 0);
+    if (validTs.length) BASE_TS = Math.min(...validTs);
+    HAS_LOADED = true;
+  }
 
   for (const it of items) {
     const ts = it.sortTs || BASE_TS || Date.now();
-    it.x = computeXFromDate(ts); // chronological X
+    it.x = computeXFromDate(ts);
     if (!Number.isFinite(it.y) || it.y <= 0) it.y = 180;
   }
 
@@ -177,7 +184,8 @@ function renderFromList(data) {
     const found = items.some((it) =>
       String(it.fileName || "") === awaitingSync.fileName &&
       String(it.tag || "") === awaitingSync.tag &&
-      Number(it.sortTs || 0) === Number(awaitingSync.sortTs || 0)
+      Number(it.sortTs || 0) === Number(awaitingSync.sortTs || 0) &&
+      Math.abs(Number(it.y || 0) - Number(awaitingSync.y || 0)) <= 2
     );
 
     if (found) {
@@ -191,7 +199,7 @@ function renderFromList(data) {
   wall.innerHTML = "";
   for (const it of items) wall.appendChild(makePhoto(it));
 
-  // if still awaiting sync, keep preview visible on top
+  // keep preview visible on top while awaiting sync
   if (awaitingSync && awaitingSync.previewEl && !awaitingSync.previewEl.isConnected) {
     wall.appendChild(awaitingSync.previewEl);
   }
@@ -237,7 +245,7 @@ function makePhoto(it) {
   return el;
 }
 
-// ---- POST upload (fetch; opaque response) ----
+// ---- POST upload ----
 async function postUpload(fields) {
   const p = new URLSearchParams();
   p.set("action", "upload");
@@ -246,7 +254,6 @@ async function postUpload(fields) {
     if (v == null) continue;
     p.set(k, String(v));
   }
-  // no-cors => we can't read response, but request will still go through
   await fetch(GAS_URL, { method: "POST", mode: "no-cors", body: p });
 }
 
@@ -269,9 +276,9 @@ function startSyncPolling() {
     awaitingSync.attempts += 1;
     listViaIframe();
 
-    // after ~20 seconds give up polling, but keep preview so user sees it
-    if (awaitingSync.attempts >= 20) {
-      toast("Saved. If it doesn’t appear, refresh once.", 2200);
+    // after ~30 seconds give up polling, but KEEP preview (don’t remove it)
+    if (awaitingSync.attempts >= 30) {
+      toast("Saved. If it still doesn’t appear, refresh once.", 2400);
       isBusy = false;
       return;
     }
@@ -284,7 +291,13 @@ function startSyncPolling() {
 
 // ---- Modal flow ----
 makeMemoryBtn.addEventListener("click", () => {
+  if (!HAS_LOADED) {
+    toast("Loading wall… try again in a sec", 1600);
+    listViaIframe();
+    return;
+  }
   if (isBusy) return toast("Wait… saving the last one ❤️");
+
   modalOverlay.style.display = "flex";
   memHint.textContent = "Pick a photo + date, then click “Place on wall”.";
   pendingMemory = null;
@@ -320,7 +333,7 @@ memPlace.addEventListener("click", async () => {
   toast("Tap anywhere on the wall to place it");
 });
 
-// ---- Place on wall: tap to place (locked during upload/sync) ----
+// ---- Place on wall ----
 wall.addEventListener("pointerdown", async (ev) => {
   if (!pendingMemory) return;
   if (isBusy) return;
@@ -332,7 +345,7 @@ wall.addEventListener("pointerdown", async (ev) => {
   ev.stopPropagation();
 
   const mem = pendingMemory;
-  pendingMemory = null; // prevents any more placements until we're done
+  pendingMemory = null;
 
   const vrect = viewport.getBoundingClientRect();
   const tapX = ev.clientX - vrect.left;
@@ -342,11 +355,10 @@ wall.addEventListener("pointerdown", async (ev) => {
   const x = computeXFromDate(dateTs);
   const y = Math.max(10, Math.round(tapY - 120));
 
-  // scroll so chronological X lands under her tap
   scrollToWallX(x, tapX);
   ensureWallWidthForX(x);
 
-  // create preview that stays UNTIL list confirms the upload exists
+  // preview stays until list confirms the uploaded row exists
   const preview = document.createElement("div");
   preview.className = "photo";
   preview.style.left = x + "px";
@@ -366,6 +378,7 @@ wall.addEventListener("pointerdown", async (ev) => {
     fileName: mem.fileName,
     tag: mem.tag,
     sortTs: dateTs,
+    y: y,
     previewEl: preview,
     attempts: 0,
     timerId: null
@@ -384,10 +397,8 @@ wall.addEventListener("pointerdown", async (ev) => {
       taken_date: mem.dateStr,
       sort_ts: dateTs
     });
-
     toast("Saved ❤️");
   } catch {
-    // fetch no-cors usually won't throw, but keep safe
     toast("Saved. If it disappears, refresh.", 2200);
   }
 
@@ -395,7 +406,6 @@ wall.addEventListener("pointerdown", async (ev) => {
   memDate.value = "";
   memFile.value = "";
 
-  // start polling list until the new row is visible, then remove preview
   startSyncPolling();
 }, { passive: false });
 
