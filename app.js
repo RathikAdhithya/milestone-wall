@@ -72,8 +72,8 @@ function toTs(dateStr) {
 }
 
 function computeXFromDate(dateTs) {
-  if (!BASE_TS) BASE_TS = dateTs || Date.now();
-  const days = Math.round((dateTs - BASE_TS) / 86400000);
+  const base = BASE_TS || (dateTs || Date.now());
+  const days = Math.floor((dateTs - base) / 86400000);
   return Math.max(20, PADDING_X + days * PX_PER_DAY);
 }
 
@@ -198,15 +198,13 @@ function normalizeItem(it) {
 function renderFromList(rawItems) {
   items = (rawItems || []).map(normalizeItem).filter(it => it.id && it.fileId);
 
-  // establish BASE_TS once
-  if (!BASE_TS) {
-    const valid = items.map(i => i.sortTs).filter(ts => ts && ts > 0);
-    BASE_TS = valid.length ? Math.min(...valid) : Date.now();
-  }
+  // set BASE_TS ONCE from earliest sortTs (or today if empty)
+  const valid = items.map(i => i.sortTs).filter(ts => ts && ts > 0);
+  BASE_TS = valid.length ? Math.min(...valid) : Date.now();
 
   for (const it of items) {
     if (!it.takenDate && it.sortTs) it.takenDate = new Date(it.sortTs).toISOString().slice(0,10);
-    if (!Number.isFinite(it.x) || it.x <= 0) it.x = computeXFromDate(it.sortTs || BASE_TS);
+    it.x = computeXFromDate(it.sortTs || BASE_TS);
     if (!Number.isFinite(it.y) || it.y <= 0) it.y = 180;
   }
 
@@ -218,7 +216,6 @@ function renderFromList(rawItems) {
   wall.innerHTML = "";
   for (const it of items) wall.appendChild(makePhoto(it));
 
-  // scroll near first item
   if (items.length) {
     const minX = items.reduce((m, it) => Math.min(m, it.x || 0), Infinity);
     viewport.scrollLeft = Math.max(0, minX - (viewport.clientWidth || 1) * 0.25);
