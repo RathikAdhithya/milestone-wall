@@ -48,9 +48,22 @@ function ensureWallWidthForX(x) {
 function formatDateLabel(s) {
   if (!s) return "";
   try {
-    const d = new Date(s + "T00:00:00");
-    return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "2-digit" });
-  } catch { return s; }
+    // accept "YYYY-MM-DD" or ms timestamp string/number
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+      const d = new Date(s + "T00:00:00");
+      return d.toLocaleDateString(undefined, { year:"numeric", month:"short", day:"2-digit" });
+    }
+    const n = Number(s);
+    if (Number.isFinite(n) && n > 0) {
+      const d = new Date(n);
+      return d.toLocaleDateString(undefined, { year:"numeric", month:"short", day:"2-digit" });
+    }
+    const d = new Date(s);
+    if (isNaN(d.getTime())) return "Invalid Date";
+    return d.toLocaleDateString(undefined, { year:"numeric", month:"short", day:"2-digit" });
+  } catch {
+    return "Invalid Date";
+  }
 }
 
 function toTs(dateStr) {
