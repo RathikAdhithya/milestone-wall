@@ -11,21 +11,23 @@ const makeMemoryBtn = document.getElementById("makeMemoryBtn");
 const modalOverlay = document.getElementById("modalOverlay");
 const memTag = document.getElementById("memTag");
 const memDate = document.getElementById("memDate");
+const memTime = document.getElementById("memTime");
+const memStory = document.getElementById("memStory");
 const memFile = document.getElementById("memFile");
 const memHint = document.getElementById("memHint");
 const memCancel = document.getElementById("memCancel");
 const memPlace = document.getElementById("memPlace");
 const toastEl = document.getElementById("toast");
 
-// Details modal
+// Details modal (full view)
 const detailOverlay = document.getElementById("detailOverlay");
 const detImg = document.getElementById("detImg");
+const detImgLoading = document.getElementById("detImgLoading");
 const detTag = document.getElementById("detTag");
 const detDate = document.getElementById("detDate");
+const detTime = document.getElementById("detTime");
+const detStory = document.getElementById("detStory");
 const detHint = document.getElementById("detHint");
-const detFileName = document.getElementById("detFileName");
-const detCreatedAt = document.getElementById("detCreatedAt");
-const detId = document.getElementById("detId");
 const detOpen = document.getElementById("detOpen");
 const detSave = document.getElementById("detSave");
 const detDelete = document.getElementById("detDelete");
@@ -120,6 +122,52 @@ function scrollToWallX(x, tapX = null) {
 }
 
 // helpers
+
+function formatDateTimeLabel(dateISO, timeStr) {
+  const d = formatDateLabel(dateISO);
+  const t = (timeStr || "").trim();
+  return t ? `${d} • ${t}` : d;
+}
+
+function bestImgUrl_(it) {
+  const fid = encodeURIComponent(it.fileId || "");
+  if (it.imgUrl) return it.imgUrl;
+  if (fid) return `https://drive.google.com/thumbnail?id=${fid}&sz=w2000`;
+  return "";
+}
+
+function loadDetailImage_(it) {
+  const primary = bestImgUrl_(it);
+  const fid = encodeURIComponent(it.fileId || "");
+  const fallback = fid ? `https://drive.google.com/thumbnail?id=${fid}&sz=w2000` : "";
+
+  // show loading overlay
+  const box = detImg && detImg.closest ? detImg.closest(".detailPreview") : null;
+  try { if (box) box.classList.add("loading"); } catch {}
+
+  const tryLoad = (src, onFail) => {
+    const pre = new Image();
+    pre.onload = () => {
+      detImg.src = src;
+      try { if (box) box.classList.remove("loading"); } catch {}
+    };
+    pre.onerror = () => onFail && onFail();
+    pre.src = src;
+  };
+
+  if (primary) {
+    tryLoad(primary, () => {
+      if (fallback && fallback !== primary) tryLoad(fallback, () => { try { if (box) box.classList.remove("loading"); } catch {} });
+      else { try { if (box) box.classList.remove("loading"); } catch {} }
+    });
+  } else if (fallback) {
+    tryLoad(fallback, () => { try { if (box) box.classList.remove("loading"); } catch {} });
+  } else {
+    try { if (box) box.classList.remove("loading"); } catch {}
+    detImg.src = "";
+  }
+}
+
 function dayIndexFromX(x) {
   // IMPORTANT: never allow negative dayIdx from dragging
   return Math.max(0, Math.round((x - PADDING_X) / PX_PER_DAY));
@@ -245,18 +293,19 @@ function openDetails_(it) {
   const el = findElById_(it.id);
   selected = { it, el };
 
-  detImg.src = it.imgUrl || "";
+  // FULL IMAGE (reliable load + fallback)
+  loadDetailImage_(it);
+
   detTag.value = (it.tag || "").slice(0,60);
 
   const dISO = it.takenDate || (it.sortTs ? isoFromTs(it.sortTs) : "");
   detDate.value = dISO || "";
 
-  detDatePill.textContent = formatDateLabel(detDate.value || dISO);
-  detHint.textContent = "";
+  detTime.value = (it.takenTime || it.taken_time || "").slice(0, 10);
+  detStory.value = String(it.story || it.storyText || "").slice(0, 8000);
 
-  detFileName.textContent = it.fileName || it.file_name || "—";
-  detCreatedAt.textContent = it.createdAt || it.created_at || "—";
-  detId.textContent = it.id || "—";
+  detDatePill.textContent = formatDateTimeLabel(detDate.value || dISO, detTime.value);
+  detHint.textContent = "";
 
   detailOverlay.style.display = "flex";
 }
@@ -269,29 +318,36 @@ function closeDetails_() {
 
 function updateDetailsHint_() {
   if (!selected || !selected.it) return;
+
   const dateStr = detDate.value;
+  const timeStr = (detTime.value || "").trim();
+
   if (!dateStr) {
     detHint.textContent = "Pick a date to move it to another column.";
-    detDatePill.textContent = "—";
+    detDatePill.textContent = timeStr ? `— • ${timeStr}` : "—";
     return;
   }
+
   const ts = toTs(dateStr);
   const x = computeXFromDate(ts);
   const dayIdx = dayIndexFromX(x);
   const { iso } = dateFromDayIndex(dayIdx);
-  detDatePill.textContent = formatDateLabel(iso);
+
+  detDatePill.textContent = formatDateTimeLabel(iso, timeStr);
   detHint.textContent = `Will snap to: ${formatDateLabel(iso)}`;
 }
 
 detailOverlay.addEventListener("click", (e) => {
   if (e.target === detailOverlay) closeDetails_();
 });
+
 detClose.addEventListener("click", closeDetails_);
 detDate.addEventListener("change", updateDetailsHint_);
+detTime.addEventListener("change", updateDetailsHint_);
 
 detOpen.addEventListener("click", () => {
   if (!selected || !selected.it) return;
-  const url = selected.it.imgUrl || "";
+  const url = bestImgUrl_(selected.it);
   if (url) window.open(url, "_blank");
 });
 
@@ -305,6 +361,8 @@ detSave.addEventListener("click", async () => {
 
   const newTag = (detTag.value || "").trim().slice(0,60);
   const newDateStr = detDate.value;
+  const newTimeStr = (detTime.value || "").trim().slice(0,10);
+  const newStory = String(detStory.value || "").slice(0,8000);
 
   if (!newDateStr) {
     isBusy = false;
@@ -313,11 +371,14 @@ detSave.addEventListener("click", async () => {
 
   const newTs = toTs(newDateStr);
   if (BASE_TS != null && newTs < BASE_TS) rebaseTo_(newTs);
+
   const newX = computeXFromDate(newTs);
   const newY = snapY(Number(it.y || 180));
 
   it.tag = newTag;
+  it.story = newStory;
   it.takenDate = newDateStr;
+  it.takenTime = newTimeStr;
   it.sortTs = newTs;
   it.x = newX;
   it.y = newY;
@@ -330,7 +391,7 @@ detSave.addEventListener("click", async () => {
     if (tagEl) tagEl.textContent = newTag;
 
     const dateEl = el.querySelector(".dateLabel");
-    if (dateEl) dateEl.textContent = formatDateLabel(newDateStr);
+    if (dateEl) dateEl.textContent = formatDateTimeLabel(newDateStr, newTimeStr);
   }
 
   ensureWallWidthForX(newX);
@@ -341,10 +402,13 @@ detSave.addEventListener("click", async () => {
     await postUpdate({
       id: it.id,
       tag: newTag,
+      story: newStory,
       x: newX,
       y: newY,
       taken_date: newDateStr,
       takenDate: newDateStr,
+      taken_time: newTimeStr,
+      takenTime: newTimeStr,
       sort_ts: newTs,
       sortTs: newTs
     });
@@ -355,7 +419,6 @@ detSave.addEventListener("click", async () => {
 
   isBusy = false;
   closeDetails_();
-  // no forced refresh; no flicker
 });
 
 detDelete.addEventListener("click", async () => {
@@ -400,7 +463,7 @@ function scheduleDragPaint_() {
 
     const { iso } = dateFromDayIndex(dayIdx);
     const dateEl = drag.el.querySelector(".dateLabel");
-    if (dateEl) dateEl.textContent = formatDateLabel(iso);
+    if (dateEl) dateEl.textContent = formatDateTimeLabel(iso, drag.it.takenTime || "");
 
     ensureWallWidthForX(sx);
     ensureWallHeightForY(sy);
@@ -499,6 +562,7 @@ async function finishDrag_(ev, canceled = false) {
   d.it.y = d.curY;
   d.it.sortTs = ts;
   d.it.takenDate = iso;
+  d.it.takenTime = d.it.takenTime || "";
 
   setCardZ_(d.el, ts);
 
@@ -512,6 +576,8 @@ async function finishDrag_(ev, canceled = false) {
       y: d.curY,
       taken_date: iso,
       takenDate: iso,
+      taken_time: d.it.takenTime || "",
+      takenTime: d.it.takenTime || "",
       sort_ts: ts,
       sortTs: ts
     });
@@ -585,6 +651,8 @@ function normalizeItem(it) {
   const fileName = String(it.fileName || it.file_name || "");
   const tag = String(it.tag || "");
   const createdAt = String(it.createdAt || it.created_at || "");
+  const takenTime = String(it.takenTime || it.taken_time || "");
+  const story = String(it.story || "");
 
   const takenDate = String(it.takenDate || it.taken_date || "");
   let sortTs = Number(it.sortTs || it.sort_ts || 0) || 0;
@@ -609,7 +677,7 @@ function normalizeItem(it) {
     (fileId ? `https://drive.google.com/uc?export=view&id=${encodeURIComponent(fileId)}` : "")
   );
 
-  return { id, fileId, fileName, tag, createdAt, takenDate, sortTs, x, y, rot, scale, clientId, imgUrl };
+  return { id, fileId, fileName, tag, story, createdAt, takenDate, takenTime, sortTs, x, y, rot, scale, clientId, imgUrl };
 }
 
 function renderFromList(rawItems) {
@@ -684,7 +752,7 @@ function renderFromList(rawItems) {
 
         // Update tag/date
         const dateEl = el.querySelector(".dateLabel");
-        if (dateEl) dateEl.textContent = formatDateLabel(it.takenDate);
+        if (dateEl) dateEl.textContent = formatDateTimeLabel(it.takenDate, it.takenTime || "");
 
         const tagEl = el.querySelector(".tag");
         if (tagEl) tagEl.textContent = it.tag || "";
@@ -729,7 +797,7 @@ function renderFromList(rawItems) {
     setCardTransform_(el, it.x || 0, it.y || 0, it.rot || 0, it.scale || 1);
 
     const dateEl = el.querySelector(".dateLabel");
-    if (dateEl) dateEl.textContent = formatDateLabel(it.takenDate);
+    if (dateEl) dateEl.textContent = formatDateTimeLabel(it.takenDate, it.takenTime || "");
 
     const tagEl = el.querySelector(".tag");
     if (tagEl) tagEl.textContent = it.tag || "";
@@ -766,7 +834,7 @@ function makePhoto(it) {
 
   const date = document.createElement("div");
   date.className = "dateLabel";
-  date.textContent = formatDateLabel(it.takenDate);
+  date.textContent = formatDateTimeLabel(it.takenDate, it.takenTime || "");
   el.appendChild(date);
 
   const frame = document.createElement("div");
@@ -851,7 +919,7 @@ makeMemoryBtn.addEventListener("click", () => {
   if (isBusy) return toast("Wait… saving ❤️");
 
   modalOverlay.style.display = "flex";
-  memHint.textContent = "Pick a photo + date, then click “Place on wall”.";
+  memHint.textContent = "Pick a photo + date/time + story, then click “Place on wall”.";
   pendingMemory = null;
 });
 
@@ -874,6 +942,9 @@ memPlace.addEventListener("click", async () => {
   const tag = (memTag.value || "").trim().slice(0, 60);
   const dateStr = memDate.value;
 
+  const timeStr = (memTime.value || "").trim().slice(0,10);
+  const story = String(memStory.value || "").slice(0,8000);
+
   if (!f) return alert("Choose an image.");
   if (!dateStr) return alert("Select the date the photo was taken.");
 
@@ -884,6 +955,8 @@ memPlace.addEventListener("click", async () => {
     fileName: f.name,
     tag,
     dateStr,
+    timeStr,
+    story,
     imageData
   };
 
@@ -928,7 +1001,7 @@ wall.addEventListener("pointerdown", async (ev) => {
   setCardTransform_(preview, x, y, 0, 1);
 
   preview.innerHTML = `
-    <div class="dateLabel">${formatDateLabel(mem.dateStr)}</div>
+    <div class="dateLabel">${formatDateTimeLabel(mem.dateStr, mem.timeStr)}</div>
     <div class="frame">
       <img src="${mem.imageData}" draggable="false" />
       <div class="tag">${mem.tag || ""}</div>
@@ -953,7 +1026,10 @@ wall.addEventListener("pointerdown", async (ev) => {
       taken_date: mem.dateStr,
       takenDate: mem.dateStr,
       sort_ts: dateTs,
-      sortTs: dateTs
+      sortTs: dateTs,
+      taken_time: mem.timeStr,
+      takenTime: mem.timeStr,
+      story: mem.story,
     });
 
     toast("Saved ❤️");
@@ -964,6 +1040,8 @@ wall.addEventListener("pointerdown", async (ev) => {
   memTag.value = "";
   memDate.value = "";
   memFile.value = "";
+  memTime.value = "";
+  memStory.value = "";
 
   setTimeout(() => {
     listViaJsonp();   // this will convert preview -> real seamlessly

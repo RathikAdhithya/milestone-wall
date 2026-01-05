@@ -23,18 +23,23 @@
       <h3>Create a memory</h3>
 
       <div class="row">
-        <input id="memTag" maxlength="60" placeholder="Short tag (e.g., 'First Trip')" />
+        <input id="memTag" maxlength="60" placeholder="Name (e.g., 'First Trip')" />
+      </div>
+
+      <div class="row two">
+        <input id="memDate" type="date" />
+        <input id="memTime" type="time" />
       </div>
 
       <div class="row">
-        <input id="memDate" type="date" />
+        <textarea id="memStory" placeholder="Story (what happened, what it means, etc.)"></textarea>
       </div>
 
       <div class="row">
         <input id="memFile" type="file" accept="image/*" />
       </div>
 
-      <div id="memHint">Pick a photo + date, then click “Place on wall”.</div>
+      <div id="memHint">Pick a photo + date/time + story, then click “Place on wall”.</div>
 
       <div class="actions">
         <button id="memCancel">Cancel</button>
@@ -43,7 +48,7 @@
     </div>
   </div>
 
-  <!-- DETAILS MODAL -->
+  <!-- DETAILS / FULL VIEW MODAL -->
   <div id="detailOverlay">
     <div id="detailModal">
       <div class="detailTop">
@@ -55,25 +60,31 @@
         <div class="detailPreview">
           <div class="detailDatePill" id="detDatePill">—</div>
           <img id="detImg" alt="memory" />
+          <div class="imgLoading" id="detImgLoading">Loading…</div>
         </div>
 
         <div class="detailForm">
-          <label class="lbl">Description</label>
-          <input id="detTag" maxlength="60" placeholder="Short tag" />
+          <label class="lbl">Name</label>
+          <input id="detTag" maxlength="60" placeholder="Name" />
 
-          <label class="lbl">Taken date</label>
-          <input id="detDate" type="date" />
+          <div class="row two">
+            <div>
+              <label class="lbl">Taken date</label>
+              <input id="detDate" type="date" />
+            </div>
+            <div>
+              <label class="lbl">Taken time</label>
+              <input id="detTime" type="time" />
+            </div>
+          </div>
 
           <div class="mini" id="detHint"></div>
 
-          <div class="detailMeta">
-            <div><span class="k">File:</span> <span id="detFileName">—</span></div>
-            <div><span class="k">Created:</span> <span id="detCreatedAt">—</span></div>
-            <div><span class="k">ID:</span> <span id="detId">—</span></div>
-          </div>
+          <label class="lbl">Story</label>
+          <textarea id="detStory" placeholder="Write the story for this memory…"></textarea>
 
           <div class="detailActions">
-            <button id="detOpen" class="ghost">Open full</button>
+            <button id="detOpen" class="ghost">Open in new tab</button>
             <button id="detDelete" class="danger">Delete</button>
             <button id="detSave" class="primary">Save</button>
           </div>
@@ -82,6 +93,6 @@
     </div>
   </div>
 
-  <script src="./app.js?v=5"></script>
+  <script src="./app.js?v=6"></script>
 </body>
 </html>
