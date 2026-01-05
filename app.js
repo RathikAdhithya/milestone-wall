@@ -1,3 +1,6 @@
+const APP_VER = "2026-01-05_layout_v1";
+console.log("Milestone Wall loaded:", APP_VER);
+
 const GAS_URL = "https://script.google.com/macros/s/AKfycbwAMAZkN1d4-xBG6bID8kyWCeNKSfKX29STFo_wipVxQFojmBP1jOvnWXKRrx1tvS6D7g/exec";
 const UPLOAD_KEY = "kR9!v3QpZx_2Gm7WASJKH972634!98762";
 
@@ -12,15 +15,23 @@ const memFile = document.getElementById("memFile");
 const memHint = document.getElementById("memHint");
 const memCancel = document.getElementById("memCancel");
 const memPlace = document.getElementById("memPlace");
-
 const toastEl = document.getElementById("toast");
 
 let items = [];
 let pendingMemory = null;
 
-let BASE_TS = null;          // stable for the whole session
-let isBusy = false;          // prevents multi-tap duplicates during upload/sync
-let awaitingSync = null;     // { fileName, tag, sortTs, y, previewEl, attempts, timerId }
+let BASE_TS = null;          // only used when x is missing
+let isBusy = false;          // prevents double placement
+let awaitingSync = null;     // { clientId, previewEl, attempts, timerId }
+
+let hasAutoScrolled = false; // auto-scroll once after load
+
+// ---- Layout tuning ----
+// approximate card footprint (used for collision detection)
+const CARD_W = 260;
+const CARD_H = 340;
+const GAP_X  = 24;
+const GAP_Y  = 28;
 
 // ---- UI ----
 function toast(msg, ms = 1400) {
@@ -33,10 +44,9 @@ function toast(msg, ms = 1400) {
 
 function ensureWallWidthForX(x) {
   const min = 20000;
-  const needed = Math.ceil(x + 700);
+  const needed = Math.ceil(x + 900);
   const cur = wall.offsetWidth || min;
-  const next = Math.max(cur, min, needed);
-  wall.style.width = next + "px";
+  wall.style.width = Math.max(cur, min, needed) + "px";
 }
 
 function formatDateLabel(s) {
@@ -56,54 +66,40 @@ function toTs(dateStr) {
 
 function computeXFromDate(dateTs) {
   if (!BASE_TS) BASE_TS = dateTs || Date.now();
-  const pxPerDay = 45;
-  const paddingX = 200;
-  const days = Math.round((dateTs - BASE_TS) / (1000 * 60 * 60 * 24));
+  const pxPerDay = 70;      // slightly wider than before
+  const paddingX = 240;
+  const days = Math.round((dateTs - BASE_TS) / 86400000);
   return Math.max(20, paddingX + days * pxPerDay);
 }
 
 function scrollToWallX(x, tapX = null) {
   const vw = viewport.clientWidth || 1;
-  const target = tapX != null ? Math.max(0, x - tapX) : Math.max(0, x - vw * 0.5);
+  const target = tapX != null ? Math.max(0, x - tapX) : Math.max(0, x - vw * 0.35);
   viewport.scrollTo({ left: target, behavior: "smooth" });
 }
 
-// ---- Layout (anti-overlap lanes) ----
-const CARD_W = 240;
-const CARD_H = 320;          // approx total vertical footprint (image + label + padding)
-const GAP_X  = 18;
-const GAP_Y  = 26;
-
-// Choose one of these modes:
-const LAYOUT_MODE = "LANES"; // "LANES" recommended
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
 function rectsOverlap(ax, ay, aw, ah, bx, by, bw, bh) {
   return !(ax + aw <= bx || bx + bw <= ax || ay + ah <= by || by + bh <= ay);
 }
 
-function clamp(v, lo, hi) {
-  return Math.max(lo, Math.min(hi, v));
-}
-
-// Find a y that doesn't overlap any existing item near this x.
-// We only check items whose x is close enough to potentially overlap.
-function pickFreeY(x, preferredY) {
-  const topPad = 40;
-  const bottomPad = 40;
+// Pick a y that doesn't collide with already-placed items near this x.
+function pickFreeY(x, preferredY, placed) {
+  const topPad = 30;
+  const bottomPad = 30;
   const wallH = wall.clientHeight || window.innerHeight;
+
   const yMin = topPad;
   const yMax = Math.max(yMin, wallH - CARD_H - bottomPad);
 
   const baseY = clamp(preferredY, yMin, yMax);
 
-  // Only consider items that could collide horizontally
-  const candidates = items.filter(it => Math.abs((it.x || 0) - x) < (CARD_W + GAP_X));
+  const candidates = placed.filter(it => Math.abs((it.x || 0) - x) < (CARD_W + GAP_X));
 
-  // Try lanes around the preferred Y: 0, +1, -1, +2, -2...
-  // Lane step = CARD_H + GAP_Y
   const step = CARD_H + GAP_Y;
 
-  for (let k = 0; k < 60; k++) {
+  for (let k = 0; k < 80; k++) {
     const dir = (k === 0) ? 0 : (k % 2 === 1 ? 1 : -1) * Math.ceil(k / 2);
     const yTry = clamp(baseY + dir * step, yMin, yMax);
 
@@ -117,8 +113,32 @@ function pickFreeY(x, preferredY) {
     if (ok) return yTry;
   }
 
-  // fallback: just clamp
   return baseY;
+}
+
+// Auto-layout ALL items to avoid overlaps, but keep x stable.
+// If y changes, we persist it back to the sheet.
+function autoLayoutAndCollectUpdates(list) {
+  const placed = [];
+  const updates = [];
+
+  // sort by x (timeline), then by date
+  const ordered = [...list].sort((a, b) => (a.x - b.x) || (a.sortTs - b.sortTs));
+
+  for (const it of ordered) {
+    const preferredY = Number.isFinite(it.y) ? it.y : 180;
+    const y2 = pickFreeY(it.x, preferredY, placed);
+
+    // If it moved enough, update
+    if (!Number.isFinite(it.y) || Math.abs(y2 - it.y) >= 2) {
+      it.y = y2;
+      if (it.id) updates.push({ id: it.id, y: y2 });
+    }
+
+    placed.push(it);
+  }
+
+  return { list: ordered, updates };
 }
 
 // ---- Drag-to-pan ----
@@ -150,7 +170,6 @@ function endPan(ev) {
   viewport.classList.remove("grabbing");
   try { viewport.releasePointerCapture(ev.pointerId); } catch {}
 }
-
 viewport.addEventListener("pointerup", endPan, { passive: true });
 viewport.addEventListener("pointercancel", endPan, { passive: true });
 viewport.addEventListener("pointerleave", endPan, { passive: true });
@@ -173,60 +192,106 @@ function listViaIframe() {
 }
 
 window.addEventListener("message", (ev) => {
-  const data = ev.data;
-  if (!data || typeof data !== "object") return;
-
-  if (data.ok && Array.isArray(data.items)) {
-    renderFromList(data);
-    return;
-  }
-
-  if (data.ok && (data.action === "upload" || data.action === "delete" || data.action === "update")) {
-    setTimeout(listViaIframe, 400);
+  try {
+    const data = ev.data;
+    if (!data || typeof data !== "object") return;
+    if (data.ok && Array.isArray(data.items)) renderFromList(data.items);
+  } catch (err) {
+    console.error("message handler error:", err);
   }
 });
 
-function renderFromList(data) {
-  items = (data.items || []).map((it) => {
+// ---- Persist y fixes back to sheet (no-cors fire-and-forget) ----
+async function postUpdate(id, fields) {
+  const p = new URLSearchParams();
+  p.set("action", "update");
+  p.set("key", UPLOAD_KEY);
+  p.set("id", id);
+  for (const [k, v] of Object.entries(fields || {})) {
+    if (v == null) continue;
+    p.set(k, String(v));
+  }
+  await fetch(GAS_URL, { method: "POST", mode: "no-cors", body: p });
+}
+
+let __updateQueue = [];
+let __updateTimer = null;
+
+function queueUpdates(updates) {
+  if (!updates || !updates.length) return;
+  for (const u of updates) __updateQueue.push(u);
+
+  if (__updateTimer) return;
+  __updateTimer = setTimeout(async () => {
+    const batch = __updateQueue.splice(0, 25); // small batch
+    __updateTimer = null;
+
+    try {
+      // send sequentially (simple + reliable)
+      for (const u of batch) {
+        await postUpdate(u.id, { y: u.y });
+      }
+    } catch (e) {
+      console.warn("update batch failed", e);
+    }
+
+    // if more remain, schedule another batch
+    if (__updateQueue.length) queueUpdates([]);
+  }, 400);
+}
+
+function renderFromList(raw) {
+  items = (raw || []).map((it) => {
     const takenDate = it.takenDate || it.taken_date || "";
     const sortTs = Number(it.sortTs || it.sort_ts || (takenDate ? toTs(takenDate) : 0));
     return {
       ...it,
+      id: String(it.id || ""),
+      fileId: String(it.fileId || ""),
+      fileName: String(it.fileName || ""),
+      tag: String(it.tag || ""),
       takenDate,
       sortTs,
-      x: Number(it.x || 0),
-      y: Number(it.y || 0),
+      x: Number(it.x),
+      y: Number(it.y),
       rot: Number(it.rot || 0),
       scale: Number(it.scale || 1),
+      clientId: String(it.clientId || it.client_id || ""),
+      imgUrl: String(it.imgUrl || "")
     };
   });
 
-  items.sort((a, b) => (a.sortTs || 0) - (b.sortTs || 0));
-
-  // IMPORTANT: set BASE_TS ONCE only (never overwrite later)
+  // establish BASE_TS once (only used if some rows are missing x)
   if (!BASE_TS) {
-    const validTs = items.map(it => it.sortTs).filter(ts => ts && ts > 0 && Number.isFinite(ts));
-    BASE_TS = validTs.length ? Math.min(...validTs) : Date.now();
+    const valid = items.map(i => i.sortTs).filter(ts => ts && ts > 0 && Number.isFinite(ts));
+    BASE_TS = valid.length ? Math.min(...valid) : Date.now();
   }
 
+  // If any row is missing x, compute it (otherwise keep stored x forever)
   for (const it of items) {
-    const ts = it.sortTs || BASE_TS || Date.now();
-    it.x = computeXFromDate(ts);
+    if (!Number.isFinite(it.x) || it.x <= 0) {
+      const ts = it.sortTs || BASE_TS || Date.now();
+      it.x = computeXFromDate(ts);
+    }
     if (!Number.isFinite(it.y) || it.y <= 0) it.y = 180;
   }
 
+  // Auto-layout to remove overlap (and persist y changes)
+  const { list: laidOut, updates } = autoLayoutAndCollectUpdates(items);
+
+  // Apply back into items (we keep the laid-out order for rendering)
+  items = laidOut;
+
+  // Persist any y fixes so refresh stays perfect
+  queueUpdates(updates);
+
+  // Ensure wall width
   const maxX = items.reduce((m, it) => Math.max(m, it.x || 0), 0);
   ensureWallWidthForX(maxX);
 
-  // confirm last upload exists in list => then remove preview + unlock
+  // Confirm upload by clientId (remove preview only when real row exists)
   if (awaitingSync) {
-    const found = items.some((it) =>
-      String(it.fileName || "") === awaitingSync.fileName &&
-      String(it.tag || "") === awaitingSync.tag &&
-      Number(it.sortTs || 0) === Number(awaitingSync.sortTs || 0) &&
-      Math.abs(Number(it.y || 0) - Number(awaitingSync.y || 0)) <= 2
-    );
-
+    const found = items.some(it => it.clientId && it.clientId === awaitingSync.clientId);
     if (found) {
       try { awaitingSync.previewEl.remove(); } catch {}
       clearTimeout(awaitingSync.timerId);
@@ -238,9 +303,17 @@ function renderFromList(data) {
   wall.innerHTML = "";
   for (const it of items) wall.appendChild(makePhoto(it));
 
-  // keep preview on top while awaiting sync
+  // Keep preview on top while awaiting sync
   if (awaitingSync && awaitingSync.previewEl && !awaitingSync.previewEl.isConnected) {
     wall.appendChild(awaitingSync.previewEl);
+  }
+
+  // Auto-scroll once so refresh NEVER looks "empty"
+  if (!hasAutoScrolled && items.length) {
+    hasAutoScrolled = true;
+    const minX = items.reduce((m, it) => Math.min(m, it.x || 0), Infinity);
+    const target = Math.max(0, minX - (viewport.clientWidth || 1) * 0.25);
+    viewport.scrollLeft = target;
   }
 }
 
@@ -248,6 +321,9 @@ function makePhoto(it) {
   const el = document.createElement("div");
   el.className = "photo";
   el.dataset.id = it.id;
+
+  // keep later dates on top
+  el.style.zIndex = String(100000 + Math.floor((it.sortTs || 0) / 86400000));
 
   const date = document.createElement("div");
   date.className = "dateLabel";
@@ -279,8 +355,6 @@ function makePhoto(it) {
   el.style.top = (it.y || 0) + "px";
   el.style.transform = `rotate(${it.rot || 0}deg) scale(${it.scale || 1})`;
 
-  el.style.zIndex = String(100000 + Math.floor((it.sortTs || 0) / 86400000));
-
   return el;
 }
 
@@ -305,6 +379,11 @@ function readFileAsDataURL(file) {
   });
 }
 
+function newClientId() {
+  try { if (crypto && crypto.randomUUID) return crypto.randomUUID(); } catch {}
+  return "cid_" + Date.now() + "_" + Math.random().toString(16).slice(2);
+}
+
 function startSyncPolling() {
   if (!awaitingSync) return;
   clearTimeout(awaitingSync.timerId);
@@ -315,22 +394,20 @@ function startSyncPolling() {
     awaitingSync.attempts += 1;
     listViaIframe();
 
-    // after ~30 seconds give up polling; KEEP preview (don’t remove it)
-    if (awaitingSync.attempts >= 30) {
+    if (awaitingSync.attempts >= 50) {
       toast("Saved. If it still doesn’t appear, refresh once.", 2400);
       isBusy = false;
       return;
     }
-
-    awaitingSync.timerId = setTimeout(tick, 900);
+    awaitingSync.timerId = setTimeout(tick, 800);
   };
 
-  awaitingSync.timerId = setTimeout(tick, 700);
+  awaitingSync.timerId = setTimeout(tick, 500);
 }
 
 // ---- Modal flow ----
 makeMemoryBtn.addEventListener("click", () => {
-  if (isBusy) return toast("Wait… saving the last one ❤️");
+  if (isBusy) return toast("Wait… saving ❤️");
   modalOverlay.style.display = "flex";
   memHint.textContent = "Pick a photo + date, then click “Place on wall”.";
   pendingMemory = null;
@@ -349,7 +426,7 @@ modalOverlay.addEventListener("click", (e) => {
 });
 
 memPlace.addEventListener("click", async () => {
-  if (isBusy) return toast("Wait… saving the last one ❤️");
+  if (isBusy) return toast("Wait… saving ❤️");
 
   const f = memFile.files && memFile.files[0];
   const tag = (memTag.value || "").trim().slice(0, 60);
@@ -360,7 +437,13 @@ memPlace.addEventListener("click", async () => {
 
   const imageData = await readFileAsDataURL(f);
 
-  pendingMemory = { fileName: f.name, tag, dateStr, imageData };
+  pendingMemory = {
+    clientId: newClientId(),
+    fileName: f.name,
+    tag,
+    dateStr,
+    imageData
+  };
 
   modalOverlay.style.display = "none";
   toast("Tap anywhere on the wall to place it");
@@ -372,7 +455,6 @@ wall.addEventListener("pointerdown", async (ev) => {
   if (isBusy) return;
 
   isBusy = true;
-
   ev.preventDefault();
   ev.stopPropagation();
 
@@ -384,9 +466,14 @@ wall.addEventListener("pointerdown", async (ev) => {
   const tapY = ev.clientY - vrect.top;
 
   const dateTs = toTs(mem.dateStr) || Date.now();
+
+  // x anchored to date
   const x = computeXFromDate(dateTs);
+
+  // y chosen by lane algorithm to avoid overlap
   const preferredY = Math.max(10, Math.round(tapY - 120));
-  const y = (LAYOUT_MODE === "LANES") ? pickFreeY(x, preferredY) : preferredY;
+  const placedNow = [...items]; // current items as collision set
+  const y = pickFreeY(x, preferredY, placedNow);
 
   scrollToWallX(x, tapX);
   ensureWallWidthForX(x);
@@ -397,6 +484,7 @@ wall.addEventListener("pointerdown", async (ev) => {
   preview.style.top = y + "px";
   preview.style.opacity = "0.98";
   preview.style.pointerEvents = "none";
+  preview.style.zIndex = "999999";
   preview.innerHTML = `
     <div class="dateLabel">${formatDateLabel(mem.dateStr)}</div>
     <div class="frame">
@@ -407,10 +495,7 @@ wall.addEventListener("pointerdown", async (ev) => {
   wall.appendChild(preview);
 
   awaitingSync = {
-    fileName: mem.fileName,
-    tag: mem.tag,
-    sortTs: dateTs,
-    y: y,
+    clientId: mem.clientId,
     previewEl: preview,
     attempts: 0,
     timerId: null
@@ -420,6 +505,7 @@ wall.addEventListener("pointerdown", async (ev) => {
 
   try {
     await postUpload({
+      client_id: mem.clientId,
       fileName: mem.fileName,
       tag: mem.tag,
       imageData: mem.imageData,
