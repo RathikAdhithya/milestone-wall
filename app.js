@@ -1,4 +1,4 @@
-const APP_VER = "2026-01-05_persist_fix_v3";
+const APP_VER = "2026-01-05_iframe_list_v4";
 console.log("Milestone Wall loaded:", APP_VER);
 
 const GAS_URL = "https://script.google.com/macros/s/AKfycbwAMAZkN1d4-xBG6bID8kyWCeNKSfKX29STFo_wipVxQFojmBP1jOvnWXKRrx1tvS6D7g/exec";
@@ -24,6 +24,12 @@ let BASE_TS = null;
 let isBusy = false;
 let wallLoaded = false;
 
+// spacing so consecutive dates never overlap
+const CARD_W = 240;
+const GAP_X  = 80;
+const PX_PER_DAY = CARD_W + GAP_X;
+const PADDING_X = 240;
+
 function toast(msg, ms = 1400) {
   if (!toastEl) return;
   toastEl.textContent = msg;
@@ -44,9 +50,7 @@ function formatDateLabel(s) {
   try {
     const d = new Date(s + "T00:00:00");
     return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "2-digit" });
-  } catch {
-    return s;
-  }
+  } catch { return s; }
 }
 
 function toTs(dateStr) {
@@ -56,10 +60,8 @@ function toTs(dateStr) {
 
 function computeXFromDate(dateTs) {
   if (!BASE_TS) BASE_TS = dateTs || Date.now();
-  const pxPerDay = 70;
-  const paddingX = 240;
   const days = Math.round((dateTs - BASE_TS) / 86400000);
-  return Math.max(20, paddingX + days * pxPerDay);
+  return Math.max(20, PADDING_X + days * PX_PER_DAY);
 }
 
 function scrollToWallX(x, tapX = null) {
@@ -103,44 +105,38 @@ viewport.addEventListener("pointercancel", endPan, { passive: true });
 viewport.addEventListener("pointerleave", endPan, { passive: true });
 
 // -----------------------
-// LIST (JSONP) - RELIABLE ON GITHUB PAGES
+// LIST VIA IFRAME + postMessage (works on GitHub Pages)
 // -----------------------
-let __jsonpScript = null;
+let gasFrame = null;
 
-window.__wallListCb = function (payload) {
-  try {
-    if (!payload || !payload.ok || !Array.isArray(payload.items)) {
-      console.warn("Bad list payload", payload);
-      toast("Failed to load wall", 1800);
-      return;
-    }
-    wallLoaded = true;
-    renderFromList(payload.items);
-  } catch (e) {
-    console.error("List callback error", e);
-  }
-};
-
-function listViaJSONP() {
-  // remove old script tag
-  try { if (__jsonpScript && __jsonpScript.parentNode) __jsonpScript.parentNode.removeChild(__jsonpScript); } catch {}
-
-  const s = document.createElement("script");
-  s.async = true;
-  s.src = `${GAS_URL}?action=list&callback=__wallListCb&_=${Date.now()}`;
-  s.onerror = () => {
-    console.warn("JSONP load failed");
-    toast("Failed to load wall", 1800);
-  };
-  __jsonpScript = s;
-  document.head.appendChild(s);
+function ensureGasFrame() {
+  if (gasFrame) return gasFrame;
+  gasFrame = document.createElement("iframe");
+  gasFrame.style.display = "none";
+  document.body.appendChild(gasFrame);
+  return gasFrame;
 }
 
+function listViaIframe() {
+  ensureGasFrame();
+  gasFrame.src = `${GAS_URL}?action=list&pm=1&_=${Date.now()}`;
+}
+
+window.addEventListener("message", (ev) => {
+  const data = ev.data;
+  if (!data || typeof data !== "object") return;
+  if (!data.ok || !Array.isArray(data.items)) {
+    toast("Failed to load wall", 1800);
+    return;
+  }
+  wallLoaded = true;
+  renderFromList(data.items);
+});
+
 // -----------------------
-// RENDER
+// RENDER (accept snake_case + camelCase)
 // -----------------------
 function normalizeItem(it) {
-  // accept BOTH snake_case + camelCase
   const id = String(it.id || "");
   const fileId = String(it.fileId || it.file_id || "");
   const fileName = String(it.fileName || it.file_name || "");
@@ -148,15 +144,19 @@ function normalizeItem(it) {
   const createdAt = String(it.createdAt || it.created_at || "");
 
   const takenDate = String(it.takenDate || it.taken_date || "");
-  const sortTs = Number(it.sortTs || it.sort_ts || (takenDate ? toTs(takenDate) : 0)) || 0;
+  let sortTs = Number(it.sortTs || it.sort_ts || 0) || 0;
+
+  // fallback: created_at
+  if (!sortTs && createdAt) {
+    const ts = Date.parse(createdAt);
+    sortTs = Number.isFinite(ts) ? ts : 0;
+  }
 
   const x = Number(it.x);
   const y = Number(it.y);
 
   const rot = Number(it.rot || 0);
   const scale = Number(it.scale || 1);
-
-  // accept imgUrl if present, otherwise compute
   const imgUrl = String(it.imgUrl || it.img_url || (fileId ? `https://drive.google.com/uc?export=view&id=${encodeURIComponent(fileId)}` : ""));
 
   return { id, fileId, fileName, tag, createdAt, takenDate, sortTs, x, y, rot, scale, imgUrl };
@@ -165,35 +165,19 @@ function normalizeItem(it) {
 function renderFromList(rawItems) {
   items = (rawItems || []).map(normalizeItem).filter(it => it.id && it.fileId);
 
-  // if sortTs missing everywhere, fallback to createdAt
-  for (const it of items) {
-    if (!it.sortTs) {
-      const ts = it.createdAt ? Date.parse(it.createdAt) : 0;
-      it.sortTs = Number.isFinite(ts) ? ts : 0;
-    }
-    if (!it.takenDate && it.sortTs) {
-      // best-effort derived date for label
-      const d = new Date(it.sortTs);
-      it.takenDate = d.toISOString().slice(0, 10);
-    }
-  }
-
   // establish BASE_TS once
   if (!BASE_TS) {
     const valid = items.map(i => i.sortTs).filter(ts => ts && ts > 0);
     BASE_TS = valid.length ? Math.min(...valid) : Date.now();
   }
 
-  // compute x if missing
   for (const it of items) {
-    if (!Number.isFinite(it.x) || it.x <= 0) {
-      it.x = computeXFromDate(it.sortTs || BASE_TS || Date.now());
-    }
+    if (!it.takenDate && it.sortTs) it.takenDate = new Date(it.sortTs).toISOString().slice(0,10);
+    if (!Number.isFinite(it.x) || it.x <= 0) it.x = computeXFromDate(it.sortTs || BASE_TS);
     if (!Number.isFinite(it.y) || it.y <= 0) it.y = 180;
   }
 
-  // sort by time (left to right)
-  items.sort((a, b) => (a.sortTs || 0) - (b.sortTs || 0));
+  items.sort((a,b)=> (a.sortTs||0)-(b.sortTs||0));
 
   const maxX = items.reduce((m, it) => Math.max(m, it.x || 0), 0);
   ensureWallWidthForX(maxX);
@@ -201,7 +185,7 @@ function renderFromList(rawItems) {
   wall.innerHTML = "";
   for (const it of items) wall.appendChild(makePhoto(it));
 
-  // auto-scroll to first item so refresh never looks "empty"
+  // scroll near first item
   if (items.length) {
     const minX = items.reduce((m, it) => Math.min(m, it.x || 0), Infinity);
     viewport.scrollLeft = Math.max(0, minX - (viewport.clientWidth || 1) * 0.25);
@@ -255,7 +239,6 @@ async function postUpload(fields) {
   const p = new URLSearchParams();
   p.set("action", "upload");
   p.set("key", UPLOAD_KEY);
-
   for (const [k, v] of Object.entries(fields || {})) {
     if (v == null) continue;
     p.set(k, String(v));
@@ -316,7 +299,6 @@ memPlace.addEventListener("click", async () => {
   pendingMemory = {
     clientId: newClientId(),
     fileName: f.name,
-    file_name: f.name,
     tag,
     dateStr,
     imageData
@@ -327,7 +309,7 @@ memPlace.addEventListener("click", async () => {
 });
 
 // -----------------------
-// PLACE ON WALL
+// PLACE ON WALL (single-tap only)
 // -----------------------
 wall.addEventListener("pointerdown", async (ev) => {
   if (!pendingMemory) return;
@@ -373,10 +355,8 @@ wall.addEventListener("pointerdown", async (ev) => {
   try {
     await postUpload({
       client_id: mem.clientId,
-      clientId: mem.clientId,
-
-      fileName: mem.fileName,
       file_name: mem.fileName,
+      fileName: mem.fileName,
 
       tag: mem.tag,
       imageData: mem.imageData,
@@ -385,7 +365,6 @@ wall.addEventListener("pointerdown", async (ev) => {
       rot: 0,
       scale: 1,
 
-      // SEND BOTH NAMING STYLES (THIS FIXES YOUR EMPTY COLUMNS)
       taken_date: mem.dateStr,
       takenDate: mem.dateStr,
 
@@ -395,21 +374,19 @@ wall.addEventListener("pointerdown", async (ev) => {
 
     toast("Saved ❤️");
   } catch {
-    toast("Saved. If it vanishes, refresh.", 2200);
+    toast("Saved. Refresh if needed.", 2000);
   }
 
   memTag.value = "";
   memDate.value = "";
   memFile.value = "";
 
-  // refresh list after upload
   setTimeout(() => {
-    listViaJSONP();
-    // remove preview after list reload
-    setTimeout(() => { try { preview.remove(); } catch {} }, 1500);
+    listViaIframe();
+    setTimeout(() => { try { preview.remove(); } catch {} }, 1200);
     isBusy = false;
   }, 900);
 }, { passive: false });
 
 // initial load
-listViaJSONP();
+listViaIframe();
