@@ -17,6 +17,7 @@
 
   <div id="toast" aria-live="polite"></div>
 
+  <!-- CREATE MEMORY MODAL -->
   <div id="modalOverlay">
     <div id="modal">
       <h3>Create a memory</h3>
@@ -38,6 +39,45 @@
       <div class="actions">
         <button id="memCancel">Cancel</button>
         <button id="memPlace" class="primary">Place on wall</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- DETAILS MODAL -->
+  <div id="detailOverlay">
+    <div id="detailModal">
+      <div class="detailTop">
+        <h3>Memory</h3>
+        <button id="detClose" class="ghost">✕</button>
+      </div>
+
+      <div class="detailBody">
+        <div class="detailPreview">
+          <div class="detailDatePill" id="detDatePill">—</div>
+          <img id="detImg" alt="memory" />
+        </div>
+
+        <div class="detailForm">
+          <label class="lbl">Description</label>
+          <input id="detTag" maxlength="60" placeholder="Short tag" />
+
+          <label class="lbl">Taken date</label>
+          <input id="detDate" type="date" />
+
+          <div class="mini" id="detHint"></div>
+
+          <div class="detailMeta">
+            <div><span class="k">File:</span> <span id="detFileName">—</span></div>
+            <div><span class="k">Created:</span> <span id="detCreatedAt">—</span></div>
+            <div><span class="k">ID:</span> <span id="detId">—</span></div>
+          </div>
+
+          <div class="detailActions">
+            <button id="detOpen" class="ghost">Open full</button>
+            <button id="detDelete" class="danger">Delete</button>
+            <button id="detSave" class="primary">Save</button>
+          </div>
+        </div>
       </div>
     </div>
   </div>
